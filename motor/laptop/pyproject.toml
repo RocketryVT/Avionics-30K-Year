@@ -1,0 +1,16 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "gs"
+version = "0.1.0"
+description = "Laptop tools for driving the ground station's antenna motors"
+requires-python = ">=3.10"
+
+# pyserial is the only thing needed. Everything else is plain standard
+# library, so a laptop at a test site needs one pip install and nothing more.
+dependencies = ["pyserial>=3.5"]
+
+[tool.setuptools.packages.find]
+include = ["gs*"]

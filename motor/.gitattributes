@@ -1,0 +1,11 @@
+# This repo is edited on Windows but compiled in WSL (Linux) out of the same
+# working tree. Force LF line endings everywhere so the two never disagree.
+* text=auto eol=lf
+
+# Files git must never rewrite
+*.uf2 binary
+*.elf binary
+*.bin binary
+*.hex binary
+*.png binary
+*.pdf binary

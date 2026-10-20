@@ -1,0 +1,31 @@
+# Build output. We normally build inside WSL (outside this OneDrive folder),
+# but ignore these anyway so a stray local build never gets committed.
+build/
+build-*/
+*.uf2
+*.elf
+*.bin
+*.hex
+*.dis
+*.map
+
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+*.egg-info/
+.venv/
+venv/
+
+# Results files written by `py -m gs.motor --log`. Test data doesn't belong
+# in git.
+/*.csv
+logs/
+
+# Editors and OS clutter
+.vscode/
+.idea/
+*.swp
+desktop.ini
+Thumbs.db
+.DS_Store
