@@ -18,8 +18,9 @@ The two directions, one line each, "\n" terminated:
     PING,<id>                           MSTAT,<uptime_s>,<az>,<el>,...
     SET,<id>,<AZ|EL>,<name>,<value>     ERR,<id>,<code>,<detail>
     SAVE,<id>                           CFG,<id>,<az_accel>,...
-    DEFAULTS,<id>
+    DEFAULTS,<id>                       GEAR,<id>,<ON|OFF>,<az_num>,...
     SETTINGS,<id>
+    GEAR,<id>[,<ON|OFF>]
 
 A MOVE can also turn both axes at once, each at its own speed:
 `MOVE,<id>,AZ,<mdps>,<mdeg>,EL,<mdps>,<mdeg>`. It is answered with one ACK,
@@ -29,6 +30,14 @@ slower axis has stopped.
 SET changes one setting on one axis - ACCEL, or the MIN or MAX travel limit
 - until the Pico restarts. SAVE keeps the settings in flash, DEFAULTS goes
 back to the built-in ones from motor_config.hpp, and SETTINGS reports them.
+
+GEAR asks which gearing the Pico is counting, or switches it. OFF is the
+10:1 gearbox alone, with angles at the gearbox output shaft and each axis
+driven on its own. ON adds the final gear pair, with angles at the antenna.
+Switching costs both axes their zero, because the drive train has changed.
+The mode is saved by SAVE along with everything else, and it changes what a
+degree means, so every angle in a results file belongs to one mode or the
+other.
 
 Two rules run through all of it.
 
@@ -70,6 +79,11 @@ GPIO_MAX = 29
 
 MOVE_AXES = ("AZ", "EL")
 ZERO_AXES = ("AZ", "EL", "ALL")
+
+# The two words GEAR takes and reports. ON means the final gear pair is in
+# the maths; see the module docstring.
+GEAR_ON = "ON"
+GEAR_OFF = "OFF"
 
 # What SET can change: acceleration in deg/sec/sec, and the travel limits in
 # degrees. Both cross the wire in thousandths, like every other number.
@@ -323,6 +337,24 @@ def settings(cmd_id: int) -> str:
     return f"SETTINGS,{_check_id(cmd_id)}"
 
 
+def gear(cmd_id: int, on: bool | None = None) -> str:
+    """Ask which gearing the Pico is counting, or switch it.
+
+    `on` left out asks the question and changes nothing. True folds the
+    final gear pair into the maths (angles at the antenna), False counts the
+    10:1 gearbox alone (angles at the gearbox output shaft, each axis driven
+    on its own).
+
+    Switching is refused while anything is moving, and when it does go
+    through it costs both axes their zero: the drive train is physically
+    different, so the step count no longer describes a known angle.
+    """
+    _check_id(cmd_id)
+    if on is None:
+        return f"GEAR,{cmd_id}"
+    return f"GEAR,{cmd_id},{GEAR_ON if on else GEAR_OFF}"
+
+
 def encode(line: str) -> bytes:
     """A command line as the bytes to write to the port.
 
@@ -433,23 +465,41 @@ class Lim(Reply):
 
     The travel limits are the built-in ones unless settings have narrowed
     them.
+
+    The speed ceiling is per axis, because geared mode scales each axis's
+    down by its own gear pair - azimuth ends up slower than elevation. The
+    floor is shared. Ask which axis you mean rather than assuming they
+    match.
     """
 
     id: int
     az_min_mdeg: int
     az_max_mdeg: int
+    az_speed_max_mdps: int
     el_min_mdeg: int
     el_max_mdeg: int
+    el_speed_max_mdps: int
     speed_min_mdps: int
-    speed_max_mdps: int
+
+    def speed_max_for(self, axis: str) -> int:
+        """That axis's ceiling, in millidegrees per second."""
+        return (
+            self.el_speed_max_mdps
+            if str(axis).strip().upper() == "EL"
+            else self.az_speed_max_mdps
+        )
 
 
 @dataclass(frozen=True)
 class Cfg(Reply):
     """The settings in force: acceleration and travel, per axis.
 
-    `saved` means a restart would come back with these same settings.
-    `built_in` means they are the numbers in motor_config.hpp.
+    `geared` says which gearing these numbers belong to. It is here rather
+    than only in Gear because switching gear is one of the things that makes
+    the settings unsaved, and because the built-in numbers differ per mode -
+    `built_in` means "the numbers in motor_config.hpp for this mode".
+
+    `saved` means a restart would come back with all of this, mode included.
     """
 
     id: int
@@ -459,8 +509,43 @@ class Cfg(Reply):
     el_accel_mdps2: int
     el_min_mdeg: int
     el_max_mdeg: int
+    geared: bool
     saved: bool
     built_in: bool
+
+
+@dataclass(frozen=True)
+class Gear(Reply):
+    """Which gearing the Pico is counting, and what it makes a degree worth.
+
+    The steps per degree come over as the exact fraction the Pico divides
+    by, not a decimal, so what is shown is what is being applied:
+
+        direct   400/9    = 44.444 steps per gearbox-output degree
+        geared   12800/126 = 101.587 steps per antenna degree (azimuth)
+                 8000/126  =  63.492 steps per antenna degree (elevation)
+    """
+
+    id: int
+    geared: bool
+    az_steps_num: int
+    az_steps_den: int
+    el_steps_num: int
+    el_steps_den: int
+
+    @property
+    def az_steps_per_deg(self) -> float:
+        return self.az_steps_num / self.az_steps_den
+
+    @property
+    def el_steps_per_deg(self) -> float:
+        return self.el_steps_num / self.el_steps_den
+
+    def describe(self) -> str:
+        """One line fit to print to the operator."""
+        if self.geared:
+            return "geared - final pair counted, angles at the ANTENNA"
+        return "direct - gearbox only, angles at the GEARBOX OUTPUT SHAFT"
 
 
 @dataclass(frozen=True)
@@ -562,8 +647,8 @@ class Info(Reply):
 # human and is passed through untouched.
 RECORD_NAMES = frozenset(
     {
-        "ACK", "PLAN", "DONE", "POS", "PIN", "LIM", "CFG", "PONG", "MSTAT",
-        "ERR",
+        "ACK", "PLAN", "DONE", "POS", "PIN", "LIM", "CFG", "GEAR", "PONG",
+        "MSTAT", "ERR",
     }
 )
 
@@ -667,18 +752,19 @@ def parse_reply(line: str) -> Reply:
         if name == "PIN" and len(f) == 4:
             return Pin(id=_int(f[1]), gpio=_int(f[2]), level=_int(f[3]))
 
-        if name == "LIM" and len(f) == 8:
+        if name == "LIM" and len(f) == 9:
             return Lim(
                 id=_int(f[1]),
                 az_min_mdeg=_int(f[2]),
                 az_max_mdeg=_int(f[3]),
-                el_min_mdeg=_int(f[4]),
-                el_max_mdeg=_int(f[5]),
-                speed_min_mdps=_int(f[6]),
-                speed_max_mdps=_int(f[7]),
+                az_speed_max_mdps=_int(f[4]),
+                el_min_mdeg=_int(f[5]),
+                el_max_mdeg=_int(f[6]),
+                el_speed_max_mdps=_int(f[7]),
+                speed_min_mdps=_int(f[8]),
             )
 
-        if name == "CFG" and len(f) == 10:
+        if name == "CFG" and len(f) == 11:
             return Cfg(
                 id=_int(f[1]),
                 az_accel_mdps2=_int(f[2]),
@@ -687,8 +773,19 @@ def parse_reply(line: str) -> Reply:
                 el_accel_mdps2=_int(f[5]),
                 el_min_mdeg=_int(f[6]),
                 el_max_mdeg=_int(f[7]),
-                saved=_word(f[8], "SAVED", "UNSAVED"),
-                built_in=_word(f[9], "BUILTIN", "CUSTOM"),
+                geared=_word(f[8], "GEARED", "DIRECT"),
+                saved=_word(f[9], "SAVED", "UNSAVED"),
+                built_in=_word(f[10], "BUILTIN", "CUSTOM"),
+            )
+
+        if name == "GEAR" and len(f) == 7:
+            return Gear(
+                id=_int(f[1]),
+                geared=_word(f[2], GEAR_ON, GEAR_OFF),
+                az_steps_num=_int(f[3]),
+                az_steps_den=_int(f[4]),
+                el_steps_num=_int(f[5]),
+                el_steps_den=_int(f[6]),
             )
 
         if name == "PONG" and len(f) == 5:

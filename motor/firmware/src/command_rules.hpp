@@ -18,7 +18,8 @@
 //
 // Moves are judged against the settings in force (MachineState's az_spec and
 // el_spec), not straight against motor_config.hpp, because acceleration and
-// travel can be changed at the prompt. SAVE is the one command whose work -
+// travel can be changed at the prompt, and because which built-in numbers an
+// axis has depends on the gear mode. SAVE is the one command whose work -
 // writing flash - the caller must do BEFORE sending the reply, since the ACK
 // means it worked. See handle() in main.cpp.
 #pragma once
@@ -42,8 +43,13 @@ struct MachineState {
     int32_t az_pos_steps = 0;
     int32_t el_pos_steps = 0;
 
-    // The settings in force: the built-in ones until something is set or
-    // loaded from flash.
+    // Which gearing the maths is counting. This decides what a degree
+    // means on both axes, so it is part of the state every command is
+    // judged against, not a setting on the side.
+    GearMode gear = GearMode::Direct;
+
+    // The settings in force: the built-in ones for `gear` until something is
+    // set or loaded from flash.
     AxisSpec az_spec = AZ_SPEC;
     AxisSpec el_spec = EL_SPEC;
 
@@ -66,6 +72,7 @@ enum class Act {
     SetPin,
     SetSettings,  // run with az_spec and el_spec from now on
     SaveSettings, // write the settings in force to flash
+    SetGear,      // change gear mode: gear, az_spec and el_spec together
 };
 
 // The most lines one command is answered with: a two-axis move's ACK and its
@@ -96,7 +103,12 @@ struct Decision {
     bool clear_az_zero = false;
     bool clear_el_zero = false;
 
-    // SetSettings: the whole of both axes' settings, as they are to be.
+    // SetSettings and SetGear: the whole of both axes' settings, as they
+    // are to be. SetGear also carries the mode they belong to, and sets the
+    // clear_*_zero flags above, because changing mode means the drive train
+    // has physically changed and the step count no longer describes a known
+    // angle.
+    GearMode gear    = GearMode::Direct;
     AxisSpec az_spec = AZ_SPEC;
     AxisSpec el_spec = EL_SPEC;
 

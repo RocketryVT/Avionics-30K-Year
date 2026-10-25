@@ -222,13 +222,17 @@ Command parse_command(const char *line)
     } else if (is_word(f[0], "SETTINGS")) {
         verb        = Verb::Settings;
         want_fields = 2;
+    } else if (is_word(f[0], "GEAR")) {
+        verb        = Verb::Gear;
+        want_fields = 2;  // or 3 with a mode, handled below
     } else {
         return fail(ParseError::UnknownVerb);
     }
 
     const bool zero_with_angle = (verb == Verb::Zero && n == 4);
     const bool move_both       = (verb == Verb::Move && n == 8);
-    if (n != want_fields && !zero_with_angle && !move_both) {
+    const bool gear_with_mode  = (verb == Verb::Gear && n == 3);
+    if (n != want_fields && !zero_with_angle && !move_both && !gear_with_mode) {
         return fail(ParseError::Syntax);
     }
 
@@ -301,6 +305,22 @@ Command parse_command(const char *line)
             return fail(ParseError::Syntax, c.id);
         }
         c.value = static_cast<int32_t>(value);
+        break;
+    }
+
+    case Verb::Gear: {
+        if (gear_with_mode) {
+            if (is_word(f[2], "ON")) {
+                c.gear_on = true;
+            } else if (is_word(f[2], "OFF")) {
+                c.gear_on = false;
+            } else {
+                // A word in the right place that is neither of the two is a
+                // malformed field, not a command we do not know.
+                return fail(ParseError::Syntax, c.id);
+            }
+            c.has_gear = true;
+        }
         break;
     }
 

@@ -70,6 +70,7 @@ const char *verb_name(Verb v)
     case Verb::Save:     return "SAVE";
     case Verb::Defaults: return "DEFAULTS";
     case Verb::Settings: return "SETTINGS";
+    case Verb::Gear:     return "GEAR";
     case Verb::None:     break;
     }
     return "NONE";
@@ -104,6 +105,11 @@ const char *err_name(ErrCode e)
     case ErrCode::Flash:      return "flash";
     }
     return "unknown";
+}
+
+const char *gear_name(GearMode g)
+{
+    return (g == GearMode::Geared) ? "ON" : "OFF";
 }
 
 size_t format_ack(char *buf, size_t n, uint16_t id, Verb verb)
@@ -170,23 +176,31 @@ size_t format_lim(char *buf, size_t n, uint16_t id, const AxisSpec &az,
                   const AxisSpec &el)
 {
     // The limits actually being enforced, so the laptop never has to guess
-    // what this particular Pico was flashed or set with.
+    // what this particular Pico was flashed or set with. Each axis carries
+    // its own speed ceiling: in geared mode they differ, because each is
+    // scaled by that axis's own gear pair.
     return finish(buf, n,
-                  snprintf(buf, n, "LIM,%u,%ld,%ld,%ld,%ld,%ld,%ld\n",
+                  snprintf(buf, n, "LIM,%u,%ld,%ld,%ld,%ld,%ld,%ld,%ld\n",
                            static_cast<unsigned>(id),
                            static_cast<long>(az.min_mdeg),
                            static_cast<long>(az.max_mdeg),
+                           static_cast<long>(az.speed_max_mdps),
                            static_cast<long>(el.min_mdeg),
                            static_cast<long>(el.max_mdeg),
-                           static_cast<long>(SPEED_MIN_MDPS),
-                           static_cast<long>(SPEED_MAX_MDPS)));
+                           static_cast<long>(el.speed_max_mdps),
+                           static_cast<long>(SPEED_MIN_MDPS)));
 }
 
-size_t format_cfg(char *buf, size_t n, uint16_t id, const AxisSpec &az,
-                  const AxisSpec &el, bool saved, bool built_in)
+size_t format_cfg(char *buf, size_t n, uint16_t id, GearMode gear,
+                  const AxisSpec &az, const AxisSpec &el, bool saved,
+                  bool built_in)
 {
+    // The gear mode rides along because it is saved in the same record:
+    // switching it is what makes the settings unsaved, so reporting SAVED
+    // or UNSAVED without it would leave the operator guessing why.
     return finish(buf, n,
-                  snprintf(buf, n, "CFG,%u,%ld,%ld,%ld,%ld,%ld,%ld,%s,%s\n",
+                  snprintf(buf, n,
+                           "CFG,%u,%ld,%ld,%ld,%ld,%ld,%ld,%s,%s,%s\n",
                            static_cast<unsigned>(id),
                            static_cast<long>(az.accel_mdps2),
                            static_cast<long>(az.min_mdeg),
@@ -194,8 +208,24 @@ size_t format_cfg(char *buf, size_t n, uint16_t id, const AxisSpec &az,
                            static_cast<long>(el.accel_mdps2),
                            static_cast<long>(el.min_mdeg),
                            static_cast<long>(el.max_mdeg),
+                           (gear == GearMode::Geared) ? "GEARED" : "DIRECT",
                            saved ? "SAVED" : "UNSAVED",
                            built_in ? "BUILTIN" : "CUSTOM"));
+}
+
+size_t format_gear(char *buf, size_t n, uint16_t id, GearMode gear,
+                   const AxisSpec &az, const AxisSpec &el)
+{
+    // The fractions rather than a rounded steps-per-degree: they are what
+    // the Pico actually divides by, and 101.587 printed back as a decimal
+    // would hide which pair produced it.
+    return finish(buf, n,
+                  snprintf(buf, n, "GEAR,%u,%s,%ld,%ld,%ld,%ld\n",
+                           static_cast<unsigned>(id), gear_name(gear),
+                           static_cast<long>(az.steps_num),
+                           static_cast<long>(az.steps_den),
+                           static_cast<long>(el.steps_num),
+                           static_cast<long>(el.steps_den)));
 }
 
 size_t format_pong(char *buf, size_t n, uint16_t id, const char *target,

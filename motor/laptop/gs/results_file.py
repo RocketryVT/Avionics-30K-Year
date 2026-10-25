@@ -19,6 +19,15 @@ rebuilt from the rows held in memory whenever anything changes. It goes to
 a temporary file first and is then moved into place, so an interrupted
 write cannot leave half a table behind.
 
+The gear column
+---------------
+
+An angle only means something alongside the gearing it was measured with:
+`gear off` rows are at the gearbox output shaft, `gear on` rows are at the
+antenna, and the same move gives numbers 1.43x (elevation) or 2.29x
+(azimuth) apart. One session can contain both, so every row carries the
+mode it was taken in.
+
 The error column
 ----------------
 
@@ -54,6 +63,7 @@ COLUMNS = [
     "row",
     "when",
     "pico",
+    "gear",
     "id",
     "axis",
     "speed_dps",
@@ -86,6 +96,7 @@ class Row:
     row: int
     when: str
     pico: str
+    gear: str  # "on", "off", or "" if the mode was never read
     id: int
     axis: str
     speed_mdps: int
@@ -118,6 +129,7 @@ class Row:
             "row": self.row,
             "when": self.when,
             "pico": self.pico,
+            "gear": self.gear,
             "id": self.id,
             "axis": self.axis,
             "speed_dps": p.format_mdeg(self.speed_mdps),
@@ -167,6 +179,12 @@ class ResultsFile:
 
     path: str
     pico: str = ""
+
+    # Which gearing the rows written from now on were taken with. The
+    # prompt keeps this up to date, so a session that switches part way
+    # through has each row marked with the mode it actually ran in.
+    gear: str = ""
+
     rows: list[Row] = field(default_factory=list)
 
     def add(self, outcome, commanded_deg: float | None = None,
@@ -177,6 +195,7 @@ class ResultsFile:
             row=len(self.rows) + 1,
             when=datetime.now().isoformat(timespec="seconds"),
             pico=self.pico,
+            gear=self.gear,
             id=done.id,
             axis=done.axis,
             speed_mdps=plan.speed_mdps,

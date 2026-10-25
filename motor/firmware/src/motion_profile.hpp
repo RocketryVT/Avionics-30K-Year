@@ -32,7 +32,7 @@ int32_t steps_to_mdeg(const AxisSpec &axis, int32_t steps);
 // Why a move was refused, or Ok if it was not.
 enum class PlanResult {
     Ok,
-    BadSpeed,    // speed outside SPEED_MIN_MDPS..SPEED_MAX_MDPS
+    BadSpeed,    // speed outside SPEED_MIN_MDPS..axis.speed_max_mdps
     OutOfRange,  // the move would finish outside the axis's soft limits
     NoMovement,  // the angle is so small it rounds to zero steps
 };

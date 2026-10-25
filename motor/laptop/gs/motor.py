@@ -67,6 +67,7 @@ HELP_TEXT = """\
   set <az|el> <min|max> <degrees>  narrow the travel, for now
   save                             keep the settings after a restart
   defaults                         back to the numbers in motor_config.hpp
+  gear [on|off]                    count the final gear pair, or not
   sweep [angle=45] [speeds=1,5,90] [pause]   one angle at each speed
   random [count=10] [speed=5] [seed=N] [pause]   angles within the limits
   true [row] <degrees>             what the protractor really reads
@@ -77,7 +78,9 @@ HELP_TEXT = """\
   quit                             leave
 
   Angles are relative: 'move az 5 -45' turns back 45 degrees.
-  Ctrl-C during a move stops the motor, then waits for its report."""
+  Ctrl-C during a move stops the motor, then waits for its report.
+  'gear on' means the belt is fitted and angles are at the antenna;
+  'gear off' means each axis on its own, angles at the gearbox shaft."""
 
 
 class UsageError(Exception):
@@ -222,14 +225,18 @@ class Console:
     def do_limits(self, args: list[str]) -> None:
         lim = self.session.limits()
         self.say(
-            f"  az {p.format_mdeg(lim.az_min_mdeg)}"
+            f"  travel  az {p.format_mdeg(lim.az_min_mdeg)}"
             f"..{p.format_mdeg(lim.az_max_mdeg)} deg"
             f"   el {p.format_mdeg(lim.el_min_mdeg)}"
             f"..{p.format_mdeg(lim.el_max_mdeg)} deg"
         )
+        # One ceiling per axis: geared mode scales each by its own gear
+        # pair, so they are not the same number.
         self.say(
-            f"  speed {p.format_mdeg(lim.speed_min_mdps)}"
-            f"..{p.format_mdeg(lim.speed_max_mdps)} deg/s"
+            f"  speed   az {p.format_mdeg(lim.speed_min_mdps)}"
+            f"..{p.format_mdeg(lim.az_speed_max_mdps)} deg/s"
+            f"   el {p.format_mdeg(lim.speed_min_mdps)}"
+            f"..{p.format_mdeg(lim.el_speed_max_mdps)} deg/s"
         )
 
     def do_pos(self, args: list[str]) -> None:
@@ -307,8 +314,58 @@ class Console:
         self.say("  back to the built-in settings")
         self.show_settings()
 
+    def do_gear(self, args: list[str]) -> None:
+        """Report or change which gearing the Pico counts."""
+        if not args:
+            self.report_gear(self.session.gear())
+            return
+        if len(args) != 1:
+            raise UsageError("gear [on|off]")
+
+        word = args[0].strip().lower()
+        if word in ("on", "yes", "true", "1"):
+            wanted = True
+        elif word in ("off", "no", "false", "0"):
+            wanted = False
+        else:
+            raise UsageError("gear [on|off]")
+
+        # Asked first so we can say whether anything actually changed. The
+        # Pico treats setting the mode already in force as a no-op, zero
+        # included, and the operator should hear which happened.
+        before = self.session.gear()
+        after = self.session.set_gear(wanted)
+        self.report_gear(after)
+
+        if after.geared == before.geared:
+            self.say("  already set that way - nothing changed")
+            return
+        self.say(
+            "  both axes have lost their zero: the drive train just "
+            "changed, so where they are is no longer known."
+        )
+        self.say("  send zero before the next move.")
+        self.show_settings()
+
+    def report_gear(self, gear: p.Gear) -> None:
+        # Every results row is marked with the mode it was taken in, so
+        # keep that current whenever we learn what the mode is - on a bare
+        # query as well as after a switch.
+        if self.results is not None:
+            self.results.gear = "on" if gear.geared else "off"
+        self.say(f"  gear {'on' if gear.geared else 'off'}: {gear.describe()}")
+        self.say(
+            f"         az {gear.az_steps_per_deg:.3f} steps/deg"
+            f"   el {gear.el_steps_per_deg:.3f} steps/deg"
+        )
+
     def show_settings(self) -> None:
         cfg = self.session.settings()
+        # First, because it decides what every number under it means.
+        self.say(
+            f"  gear {'on' if cfg.geared else 'off'} - angles at the "
+            f"{'antenna' if cfg.geared else 'gearbox output shaft'}"
+        )
         for name, accel, low, high in (
             ("az", cfg.az_accel_mdps2, cfg.az_min_mdeg, cfg.az_max_mdeg),
             ("el", cfg.el_accel_mdps2, cfg.el_min_mdeg, cfg.el_max_mdeg),
@@ -323,7 +380,13 @@ class Console:
                 "Type save to keep them."
             )
         elif cfg.built_in:
-            self.say("  the built-in numbers from motor_config.hpp")
+            # The gear mode is saved with the rest, so say that a restart
+            # comes back here - it is the thing most worth confirming
+            # straight after switching.
+            self.say(
+                "  the built-in numbers from motor_config.hpp for this "
+                "gear mode - a restart comes back here"
+            )
         else:
             self.say("  saved - a restart comes back with these")
 
@@ -681,6 +744,7 @@ class Console:
         "set": do_set,
         "save": do_save,
         "defaults": do_defaults,
+        "gear": do_gear,
         "sweep": do_sweep,
         "random": do_random,
         "true": do_true,
@@ -815,9 +879,22 @@ def main(argv: list[str] | None = None) -> int:
         except sn.SessionError as exc:
             print(f"warning: no answer to PING ({exc})")
 
+        # Which gearing it is counting, every time. It decides what every
+        # angle typed and reported means, and a Pico that was already
+        # running has no banner left on screen to say.
+        gear_word = ""
+        try:
+            gear = session.gear()
+            gear_word = "on" if gear.geared else "off"
+            print(f"gear {gear_word}: {gear.describe()}")
+        except sn.SessionError as exc:
+            print(f"warning: could not read the gear mode ({exc})")
+
         if args.log is not None:
             path = args.log or results_file.default_path()
-            console.results = results_file.ResultsFile(path=path, pico=who)
+            console.results = results_file.ResultsFile(
+                path=path, pico=who, gear=gear_word
+            )
             console.results.write()  # so the file exists from the start
             print(f"logging to {path}")
 

@@ -33,11 +33,12 @@ int32_t mdeg_to_steps(const AxisSpec &axis, int32_t mdeg)
 {
     // steps = mdeg/1000 * steps_num/steps_den, rearranged to divide only once.
     //
-    // int64 because the top can get too big for int32. With only the 10:1
-    // gearbox a full turn is 360000 * 400 = 144 million, which fits, but with
-    // the full antenna gearing it is 360000 * 6400 = 2.3 billion - past the
-    // int32 ceiling of 2.15 billion, where it would silently come out
-    // negative. Keep the int64 so that switch cannot break this.
+    // int64 because the top can get too big for int32. In direct mode a full
+    // turn is 360000 * 400 = 144 million, which fits, but in geared mode
+    // azimuth is 360000 * 12800 = 4.6 billion - well past the int32 ceiling
+    // of 2.15 billion, where it would silently come out negative. The gear
+    // switch is flipped at the prompt, so this is reached at run time, not
+    // by editing the code.
     const int64_t top    = static_cast<int64_t>(mdeg) * axis.steps_num;
     const int64_t bottom = static_cast<int64_t>(axis.steps_den) * 1000;
     return static_cast<int32_t>(div_round(top, bottom));
@@ -117,7 +118,10 @@ PlanResult plan_move(const AxisSpec &axis, int32_t pos_steps,
     out->to_mdeg    = steps_to_mdeg(axis, target_steps);
     out->speed_mdps = speed_mdps;
 
-    if (speed_mdps < SPEED_MIN_MDPS || speed_mdps > SPEED_MAX_MDPS) {
+    // The ceiling is the axis's own, not a global: geared mode scales it
+    // down with the gearing, so the motor is never commanded past the speed
+    // its torque curve was read at.
+    if (speed_mdps < SPEED_MIN_MDPS || speed_mdps > axis.speed_max_mdps) {
         return PlanResult::BadSpeed;
     }
 
@@ -132,8 +136,8 @@ PlanResult plan_move(const AxisSpec &axis, int32_t pos_steps,
     //
     // The limits are written in degrees, but the machine only moves in whole
     // steps, and converting the result back to degrees rounds a second time.
-    // Checking "360 degrees" that way can fail: with the full antenna
-    // gearing, 36571 steps reads back as 359.996 and one more as 360.006,
+    // Checking "360 degrees" that way can fail: in geared mode azimuth's
+    // 36571 steps reads back as 359.996 and one more as 360.006,
     // which looks past a 360.000 limit even though it is the nearest step.
     // Converting the limit into steps once removes the second rounding and
     // lets a move land exactly on the boundary.

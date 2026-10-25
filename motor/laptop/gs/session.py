@@ -325,6 +325,24 @@ class Session:
         cmd_id = self.ids.next()
         return self.request(p.settings(cmd_id), cmd_id, (p.Cfg,), "SETTINGS")
 
+    def gear(self) -> p.Gear:
+        """Which gearing the Pico is counting. Changes nothing."""
+        cmd_id = self.ids.next()
+        return self.request(p.gear(cmd_id), cmd_id, (p.Gear,), "GEAR")
+
+    def set_gear(self, on: bool) -> p.Gear:
+        """Switch the final gear pair in or out of the maths.
+
+        Returns what the Pico is counting afterwards, so the caller can
+        confirm rather than assume.
+
+        Asking for the mode already in force changes nothing. A real switch
+        costs both axes their zero, so re-zero before moving - the Pico will
+        refuse a move until you do.
+        """
+        cmd_id = self.ids.next()
+        return self.request(p.gear(cmd_id, on), cmd_id, (p.Gear,), "GEAR")
+
     # --- moving -------------------------------------------------------------
 
     def begin_move(

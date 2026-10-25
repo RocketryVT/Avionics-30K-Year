@@ -51,17 +51,16 @@ bool settings_sector_is_free()
     return program_end <= XIP_BASE + SETTINGS_OFFSET;
 }
 
-LoadResult load_settings(AxisSpec *az, AxisSpec *el)
+LoadResult load_settings(GearMode *gear, AxisSpec *az, AxisSpec *el)
 {
-    return decode_settings(stored(), SETTINGS_RECORD_LEN, AZ_SPEC, EL_SPEC,
-                           az, el);
+    return decode_settings(stored(), SETTINGS_RECORD_LEN, gear, az, el);
 }
 
-void save_settings(const AxisSpec &az, const AxisSpec &el)
+void save_settings(GearMode gear, const AxisSpec &az, const AxisSpec &el)
 {
     // The rest of the page is left as erased flash reads, 0xFF.
     memset(g_page, 0xFF, sizeof(g_page));
-    encode_settings(AZ_SPEC, EL_SPEC, az, el, g_page, sizeof(g_page));
+    encode_settings(gear, az, el, g_page, sizeof(g_page));
 
     // Only one core runs, so this just turns interrupts off for the write.
     // A failure leaves flash as it was, which the caller's read-back shows.

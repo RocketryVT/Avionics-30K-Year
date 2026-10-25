@@ -13,8 +13,9 @@
 // the first SAVE.
 bool settings_sector_is_free();
 
-// Read what was saved. Only on LoadResult::Ok are *az and *el changed.
-LoadResult load_settings(AxisSpec *az, AxisSpec *el);
+// Read what was saved. Only on LoadResult::Ok are *gear, *az and *el
+// changed, so seed them with the mode to fall back to first.
+LoadResult load_settings(GearMode *gear, AxisSpec *az, AxisSpec *el);
 
 // Write these settings to flash. Returns once it is done, about 50 ms later.
 //
@@ -25,4 +26,4 @@ LoadResult load_settings(AxisSpec *az, AxisSpec *el);
 //
 // Nothing is returned: whether it worked is found by reading it back with
 // load_settings(), which is the only answer worth trusting.
-void save_settings(const AxisSpec &az, const AxisSpec &el);
+void save_settings(GearMode gear, const AxisSpec &az, const AxisSpec &el);

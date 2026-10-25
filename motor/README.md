@@ -26,7 +26,7 @@ py -m gs.motor  --- text commands -->  gs_motor  --- step + dir -->  CL57TE x2
 | File | What it does |
 | --- | --- |
 | `main.cpp` | Starts up, then runs one loop: read commands, step the motors, report back |
-| `motor_config.hpp` | **The numbers to edit**: steps per degree, travel limits, speeds, acceleration |
+| `motor_config.hpp` | **The numbers to edit**: gear pairs, steps per degree, travel limits, speeds, acceleration |
 | `pins.hpp` | Which Pico pin goes to which driver wire |
 | `line_reader` | Collects bytes from USB into one command line |
 | `command_parser` | Turns a line of text into a command |
@@ -86,6 +86,7 @@ New machine? Do `docs/SETUP.md` first.
 | `set <az\|el> <min\|max> <deg>` | Narrow an axis's travel. It can't go past what `motor_config.hpp` allows |
 | `save` | Keep the settings, so a restart comes back with them |
 | `defaults` | Back to the numbers in `motor_config.hpp` (then `save` to keep that) |
+| `gear [on\|off]` | Whether the final gear pair is counted. See **Gear modes** |
 | `pin <gpio> <0\|1>` | Hold a pin high or low, for a multimeter (GP4-7, GP12-15). A step pin (GP4, GP6) costs that axis its zero |
 | `sweep [axis=az] [angle=45] [speeds=1,5,90] [pause]` | One angle at each speed in turn |
 | `random [axis=az] [count=10] [speed=5] [seed=N] [pause]` | Random angles inside the limits |
@@ -104,6 +105,48 @@ Acceleration and travel can be tuned at the prompt with no reflash. Saved
 settings live on the Pico and survive restarts and reflashes. The exception
 is when you change `motor_config.hpp` and reflash: then the saved settings
 are ignored and the new built-in numbers are used.
+
+### Gear modes
+
+Each motor has a 10:1 planetary gearbox, and after that a final gear pair to
+the antenna. `gear` says whether that pair is in the drive train, and so
+whether it should be in the maths.
+
+| | `gear off` (direct) | `gear on` (geared) |
+| --- | --- | --- |
+| What is bolted up | Each motor on its own | The belt to the centre piece |
+| An angle means | At the gearbox output shaft | At the antenna |
+| Azimuth | 44.444 steps/deg | 101.587 steps/deg (32:14 pair) |
+| Elevation | 44.444 steps/deg | 63.492 steps/deg (20:14 pair) |
+| Travel | az 0-360, el 0-360 | az 0-360, el **0-180** |
+| Speed ceiling | 181 deg/s both | az 79.187, el 126.700 deg/s |
+| Acceleration | 135 deg/s/s both | az 59.062, el 94.500 deg/s/s |
+
+The speeds look slower in geared mode because they are measured at the
+antenna. The motor is asked for exactly the same thing in both: the pair
+changes what the antenna does, not what the motor does. That is deliberate -
+181 deg/s of antenna through azimuth's pair would be about 690 rpm at the
+motor, past where its torque halves, and a stepper that stalls there loses
+position with nothing able to notice.
+
+**Run the wrong mode and every move is out by the pair's ratio** - 1.43x on
+elevation, 2.29x on azimuth. This is not hypothetical: on 18 Oct 2026, with
+the pair in the maths and not in the machine, 180 commanded on elevation
+turned about 270.
+
+Switching costs both axes their zero, because the drive train has physically
+changed and the step count no longer describes a known angle. Re-zero before
+moving. Asking for the mode already in force changes nothing and costs no
+zero.
+
+The mode is kept by `save` along with the other settings, so a restart comes
+back in it. A Pico with nothing saved comes up in direct mode. The mode is
+printed in the startup banner, by `gear`, and by `settings`.
+
+Before the first geared move, check `motor_config.hpp`: nobody has counted
+azimuth's 32 teeth on this machine, and elevation's 0-180 travel has not been
+measured on the assembled antenna. Those two numbers are the only thing
+between a mistyped command and a hard stop.
 
 ### In a terminal (Windows, from this folder)
 

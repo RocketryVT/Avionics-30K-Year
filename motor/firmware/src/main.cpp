@@ -49,17 +49,24 @@
 
 constexpr uint32_t HEARTBEAT_PERIOD_MS = 5000;
 
+// Which gearing the maths counts: the gearbox alone, or the gearbox and the
+// final pair. Direct until a saved record says otherwise, because a wrong
+// guess that way undershoots instead of driving into a hard stop.
+static GearMode g_gear = GearMode::Direct;
+
 // The settings in force - acceleration and travel, which can be changed at
-// the prompt. They start as the built-in ones and at startup are replaced by
-// any good ones saved in flash. The steppers read their fixed numbers (steps
-// per degree, direction) from here too, so each axis has one description.
+// the prompt. They start as the built-in ones for g_gear and at startup are
+// replaced by any good ones saved in flash. The steppers read their fixed
+// numbers (steps per degree, direction) from here too, so each axis has one
+// description, and switching gear mode rewrites it in place.
 static AxisSpec g_az_spec = AZ_SPEC;
 static AxisSpec g_el_spec = EL_SPEC;
 
 // What a restart would come back with, so the laptop can be told whether the
-// settings in force have been saved.
-static AxisSpec g_boot_az = AZ_SPEC;
-static AxisSpec g_boot_el = EL_SPEC;
+// settings in force have been saved. The gear mode is saved with them.
+static GearMode g_boot_gear = GearMode::Direct;
+static AxisSpec g_boot_az   = AZ_SPEC;
+static AxisSpec g_boot_el   = EL_SPEC;
 
 static Stepper g_az(g_az_spec, PIN_AZ_PUL, PIN_AZ_DIR);
 static Stepper g_el(g_el_spec, PIN_EL_PUL, PIN_EL_DIR);
@@ -125,9 +132,12 @@ static void fatal_forever(const char *reason)
 // this build, otherwise the built-in ones.
 static LoadResult read_boot_settings()
 {
-    g_boot_az = AZ_SPEC;
-    g_boot_el = EL_SPEC;
-    return load_settings(&g_boot_az, &g_boot_el);
+    // Seeded with direct mode and its numbers, so a record that is blank,
+    // corrupt or stale leaves the machine counting the gearbox alone.
+    g_boot_gear = GearMode::Direct;
+    g_boot_az   = AZ_SPEC;
+    g_boot_el   = EL_SPEC;
+    return load_settings(&g_boot_gear, &g_boot_az, &g_boot_el);
 }
 
 static const char *settings_note(LoadResult r)
@@ -143,11 +153,23 @@ static const char *settings_note(LoadResult r)
     return "built in";
 }
 
+// Spelled out rather than just "on" or "off": getting this wrong puts every
+// move out by the gear pair's ratio, and this line is the operator's one
+// chance to notice before they type a move.
+static const char *gear_note(GearMode g)
+{
+    return (g == GearMode::Geared)
+               ? "GEARED - final pair counted, angles at the ANTENNA"
+               : "direct - gearbox only, angles at the GEARBOX OUTPUT SHAFT";
+}
+
 static void print_banner(LoadResult loaded)
 {
     printf("[motor] pins AZ PUL=GP%u DIR=GP%u  EL PUL=GP%u DIR=GP%u  idle HIGH OK\n",
            PIN_AZ_PUL, PIN_AZ_DIR, PIN_EL_PUL, PIN_EL_DIR);
     printf("[motor] active low: PUL rests HIGH and is pulled LOW to step\n");
+
+    printf("[motor] gear %s\n", gear_note(g_gear));
 
     printf("[motor] ready az=");
     print_steps_per_deg(g_az_spec);
@@ -193,9 +215,11 @@ static MachineState snapshot()
     s.el_zeroed    = g_el.zeroed();
     s.az_pos_steps = g_az.pos_steps();
     s.el_pos_steps = g_el.pos_steps();
+    s.gear         = g_gear;
     s.az_spec      = g_az_spec;
     s.el_spec      = g_el_spec;
-    s.settings_unsaved = !same_settings(g_az_spec, g_boot_az) ||
+    s.settings_unsaved = g_gear != g_boot_gear ||
+                         !same_settings(g_az_spec, g_boot_az) ||
                          !same_settings(g_el_spec, g_boot_el);
     s.uptime_ms    = to_ms_since_boot(get_absolute_time());
     s.target       = GS_TARGET_NAME;
@@ -216,13 +240,6 @@ static void set_test_pin(const Decision &d)
         gpio_set_dir(d.gpio, GPIO_OUT);
     }
     gpio_put(d.gpio, d.level != 0);
-
-    if (d.clear_az_zero) {
-        g_az.clear_zero();
-    }
-    if (d.clear_el_zero) {
-        g_el.clear_zero();
-    }
 }
 
 // Carry out what decide() asked for. Nothing here chooses anything.
@@ -273,6 +290,24 @@ static void apply(const Decision &d)
         break;
     case Act::SaveSettings:
         break;  // already done in handle(), before the reply
+    case Act::SetGear:
+        // Both specs are replaced whole, not just their settable numbers:
+        // the mode decides steps per degree and every speed number too.
+        g_gear    = d.gear;
+        g_az_spec = d.az_spec;
+        g_el_spec = d.el_spec;
+        break;
+    }
+
+    // An axis stops knowing where it is when a step goes out uncounted (a
+    // step pin driven by hand) or when the drive train changes under it (a
+    // gear mode switch). Either way it has to be re-zeroed before it may
+    // move again.
+    if (d.clear_az_zero) {
+        g_az.clear_zero();
+    }
+    if (d.clear_el_zero) {
+        g_el.clear_zero();
     }
 }
 
@@ -285,9 +320,9 @@ static void handle(const Command &c)
     // back, the same way the next startup will, so the ACK means a restart
     // will come back with these settings.
     if (d.act == Act::SaveSettings) {
-        save_settings(g_az_spec, g_el_spec);
+        save_settings(g_gear, g_az_spec, g_el_spec);
         read_boot_settings();
-        if (!same_settings(g_boot_az, g_az_spec) ||
+        if (g_boot_gear != g_gear || !same_settings(g_boot_az, g_az_spec) ||
             !same_settings(g_boot_el, g_el_spec)) {
             send(format_err(g_out, sizeof(g_out), c.id, ErrCode::Flash, ""));
             return;
@@ -351,6 +386,7 @@ int main()
         fatal_forever("the program has grown into the settings sector");
     }
     const LoadResult loaded = read_boot_settings();
+    g_gear    = g_boot_gear;
     g_az_spec = g_boot_az;
     g_el_spec = g_boot_el;
 

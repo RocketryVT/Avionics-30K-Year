@@ -22,6 +22,10 @@
 //   SAVE,<id>                                     keep the settings in flash
 //   DEFAULTS,<id>                                 back to the built-in ones
 //   SETTINGS,<id>                                 report the settings
+//   GEAR,<id>[,<ON|OFF>]                          report or change gear mode
+//
+// GEAR with no mode asks which one is in force. With ON or OFF it switches,
+// which changes what a degree means on both axes - see motor_config.hpp.
 //
 // A SET value is millidegrees per second per second for ACCEL, and
 // millidegrees for the MIN and MAX travel limits.
@@ -53,6 +57,7 @@ enum class Verb {
     Save,
     Defaults,
     Settings,
+    Gear,
 };
 
 enum class AxisId {
@@ -103,6 +108,11 @@ struct Command {
 
     uint8_t gpio    = 0;             // PIN
     uint8_t level   = 0;             // PIN
+
+    // GEAR: was a mode given, and which. Without one the command is a
+    // question rather than a change.
+    bool has_gear   = false;
+    bool gear_on    = false;
 };
 
 // Read one line. On failure the returned command has err set and verb left as
