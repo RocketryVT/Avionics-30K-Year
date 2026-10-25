@@ -278,7 +278,17 @@ constexpr AxisSpec geared(const AxisSpec &base, const GearPair &pair,
 // ----------------------------------------------------------------------------
 // Azimuth (the board calls it Servo 1)
 // ----------------------------------------------------------------------------
-// Direct travel is one full turn of the gearbox shaft.
+// Travel is -180 to +180 degrees from the zero, set at the bench on 25 Oct
+// 2026 - one full turn, centred on the zero, in both gear modes.
+//
+// There is no wrap-around anywhere: an angle is a plain number, not a compass
+// bearing, so `goto az 5 179` from -179 turns +358 degrees through 0 rather
+// than taking the 2-degree short cut across the seam at +/-180. That is the
+// point of the limits - whatever is cabled to the axis is never wound more
+// than one turn. It does mean the seam is where something dramatic happens:
+// a target crossing from +179.9 to -179.9 is a full turn the other way. Zero
+// the axis so the seam points somewhere the rocket will not be (behind the
+// launch direction, say).
 //
 // Acceleration is 135 deg/sec/sec, verified at the bench on 18 Oct 2026. It
 // reaches the 181 deg/sec ceiling in 1.3 seconds, over about 121 degrees, so
@@ -289,9 +299,10 @@ constexpr AxisSpec geared(const AxisSpec &base, const GearPair &pair,
 constexpr AxisSpec AZ_SPEC = {
     400,     // steps_num
     9,       // steps_den     -> 44.444 steps per degree
-    0,       // min_mdeg      0 degrees
-    360000,  // max_mdeg      360 degrees
-    false,   // invert_dir    unverified
+    -180000, // min_mdeg      -180 degrees
+    180000,  // max_mdeg      +180 degrees
+    false,   // invert_dir    `move az` turned the right way at the bench,
+             //               25 Oct 2026
     V_START_MDPS,
     135000,  // accel_mdps2   135 deg/sec/sec (aiming for 180)
     ACCEL_MIN_MDPS2,
@@ -302,13 +313,13 @@ constexpr AxisSpec AZ_SPEC = {
 };
 
 // Geared: 400/9 * 32/14 = 12800/126 = 6400/63 = 101.587 steps per antenna
-// degree. Azimuth goes all the way round, which is 2.3 turns of the gearbox
+// degree. One full turn of antenna, -180 to +180, is 2.3 turns of the gearbox
 // shaft. The scaled numbers come out at 2.187 deg/s start, 59.062 deg/s/s
 // acceleration and a 79.187 deg/s ceiling.
 constexpr AxisSpec AZ_SPEC_GEARED =
     geared(AZ_SPEC, AZ_PAIR,
-           0,       // min_mdeg    0 degrees
-           360000,  // max_mdeg    360 degrees of antenna
+           -180000, // min_mdeg    -180 degrees of antenna
+           180000,  // max_mdeg    +180 degrees of antenna
            false);  // invert_dir  unverified - a ring and pinion may flip it
 
 // ----------------------------------------------------------------------------
@@ -358,7 +369,7 @@ constexpr AxisSpec EL_SPEC_GEARED =
                     //             -10, so check the mount clears -25 first
            180000,  // max_mdeg    180 degrees of antenna
            false);  // invert_dir  same as direct, because a belt does not
-                    //             reverse rotation. Not yet seen with the
+           //             reverse rotation. Not yet seen with the
                     //             belt on - confirm on the first geared move
 
 // ============================================================================

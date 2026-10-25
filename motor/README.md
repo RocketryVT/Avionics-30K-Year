@@ -133,7 +133,7 @@ whether it should be in the maths.
 | An angle means | At the gearbox output shaft | At the antenna |
 | Azimuth | 44.444 steps/deg | 101.587 steps/deg (32:14 pair) |
 | Elevation | 44.444 steps/deg | 63.492 steps/deg (20:14 pair) |
-| Travel | az 0-360, el 0-360 | az 0-360, el **0-180** |
+| Travel | az -180 to +180, el -25 to 360 | az -180 to +180, el -25 to 180 |
 | Speed ceiling | 181 deg/s both | az 79.187, el 126.700 deg/s |
 | Acceleration | 135 deg/s/s both | az 59.062, el 94.500 deg/s/s |
 

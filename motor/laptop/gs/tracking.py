@@ -35,6 +35,26 @@ from gs import protocol as p
 from gs import session as sn
 from gs import targets as tg
 
+def wrap_azimuth(deg: float) -> float:
+    """A compass bearing as an azimuth the Pico will accept: -180 .. +180.
+
+    Sources speak in bearings, 0 to 360 clockwise from north. The Pico's
+    azimuth runs -180 to +180 from its zero, with no wrap-around, so a bearing
+    of 270 sent as-is would be held at the +180 limit - pointing 90 degrees
+    the wrong way. 270 is -90; that is what goes on the wire.
+
+    This assumes the azimuth zero was set facing north. If it was set facing
+    somewhere else, every bearing is off by that much, and the place to fix
+    it is the zero, not here.
+
+    The seam: a target crossing south moves from +179.9 to -179.9, and the Pico
+    turns a full circle the other way to follow it - correctly, by its own
+    rules, because it will not cross +/-180. Put the seam where the rocket
+    will not be.
+    """
+    return (float(deg) + 180.0) % 360.0 - 180.0
+
+
 # How often a target goes out, unless told otherwise.
 #
 # Five a second against a target sweeping at 40 deg/s leaves the antenna up to
@@ -174,7 +194,8 @@ class TrackingLoop:
 
     # --- the loop ----------------------------------------------------------
 
-    def _is_clamped(self, fix: tg.Fix | None) -> bool:
+    def _is_clamped(self, az_deg: float | None,
+                    el_deg: float | None) -> bool:
         """Is the direction just asked for outside what the axes can reach?
 
         Worked out from the fix and the travel limits, not from what the Pico
@@ -185,10 +206,10 @@ class TrackingLoop:
         limit flags that too. Asking "did I just request something out of
         range" has neither problem, and the laptop already knows.
         """
-        if fix is None or self._lim is None:
+        if az_deg is None or self._lim is None:
             return False
-        az = p.deg_to_mdeg(fix.az_deg)
-        el = p.deg_to_mdeg(fix.el_deg)
+        az = p.deg_to_mdeg(az_deg)
+        el = p.deg_to_mdeg(el_deg)
         return (az < self._lim.az_min_mdeg or az > self._lim.az_max_mdeg or
                 el < self._lim.el_min_mdeg or el > self._lim.el_max_mdeg)
 
@@ -209,12 +230,18 @@ class TrackingLoop:
         self._next_send = now + self.period
 
         fix = self.source.latest(now)
+        az = el = None
         if fix is not None:
-            self.session.set_target(fix.az_deg, fix.el_deg)
+            # The source's bearing, as the azimuth the Pico works in. The
+            # flight log keeps the bearing in source_az and the Pico's own
+            # number in target_az, so the conversion stays visible.
+            az = wrap_azimuth(fix.az_deg)
+            el = fix.el_deg
+            self.session.set_target(az, el)
             self._sent += 1
 
         sample = Sample(t=now - self._began, fix=fix, trk=self._trk,
-                        clamped=self._is_clamped(fix))
+                        clamped=self._is_clamped(az, el))
         self._last = sample
         if self.log is not None:
             self.log.add(sample.t, fix, self._trk)
