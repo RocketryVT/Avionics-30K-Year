@@ -59,6 +59,7 @@ const char *verb_name(Verb v)
 {
     switch (v) {
     case Verb::Move:     return "MOVE";
+    case Verb::MoveTo:   return "MOVETO";
     case Verb::Stop:     return "STOP";
     case Verb::Estop:    return "ESTOP";
     case Verb::Zero:     return "ZERO";

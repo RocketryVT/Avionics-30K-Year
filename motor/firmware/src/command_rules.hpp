@@ -10,6 +10,11 @@
 // first pulse, because nothing may be printed between the first pulse and the
 // last.
 //
+// MOVE and MOVETO are the same command but for what the angle means - how
+// far to turn, or where to end up. They share every check and every reply;
+// only the arithmetic at the front differs, and the ACK echoes whichever
+// verb was sent.
+//
 // A MOVE may name both axes, each with its own speed and angle. Each half is
 // checked exactly as a one-axis MOVE would be, azimuth first whichever order
 // they were written in, and a refusal of either refuses the whole command:

@@ -105,10 +105,13 @@ static void plan_speed(const AxisSpec &axis, Move *m)
                                       : static_cast<uint32_t>(total);
 }
 
-PlanResult plan_move(const AxisSpec &axis, int32_t pos_steps,
-                     int32_t delta_mdeg, int32_t speed_mdps, Move *out)
+// The body shared by plan_move and plan_move_to. Both work out how many
+// steps to turn and then everything else is identical, so the checks and the
+// speed plan live here once.
+static PlanResult plan_from_steps(const AxisSpec &axis, int32_t pos_steps,
+                                  int32_t delta_steps, int32_t speed_mdps,
+                                  Move *out)
 {
-    const int32_t delta_steps  = mdeg_to_steps(axis, delta_mdeg);
     const int32_t target_steps = pos_steps + delta_steps;
 
     // Fill this in before any check can fail, so an error message can report
@@ -150,6 +153,24 @@ PlanResult plan_move(const AxisSpec &axis, int32_t pos_steps,
 
     plan_speed(axis, out);
     return PlanResult::Ok;
+}
+
+PlanResult plan_move(const AxisSpec &axis, int32_t pos_steps,
+                     int32_t delta_mdeg, int32_t speed_mdps, Move *out)
+{
+    return plan_from_steps(axis, pos_steps, mdeg_to_steps(axis, delta_mdeg),
+                           speed_mdps, out);
+}
+
+PlanResult plan_move_to(const AxisSpec &axis, int32_t pos_steps,
+                        int32_t target_mdeg, int32_t speed_mdps, Move *out)
+{
+    // Subtracted in steps, not in millidegrees, so the angle is rounded
+    // exactly once. The axis ends up on the nearest whole step to the angle
+    // asked for, and PLAN reports which one that is.
+    const int32_t target_steps = mdeg_to_steps(axis, target_mdeg);
+    return plan_from_steps(axis, pos_steps, target_steps - pos_steps,
+                           speed_mdps, out);
 }
 
 // Clamp a to the range lo..hi.

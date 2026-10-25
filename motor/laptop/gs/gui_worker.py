@@ -193,13 +193,16 @@ class MotorWorker(threading.Thread):
     def zero(self, axis: str = "ALL", deg: float | None = None) -> None:
         self._jobs.put(_Job("zero", (axis, deg)))
 
-    def move(self, axis: str, speed_dps: float, delta_deg: float) -> None:
-        self._jobs.put(_Job("move", (axis, speed_dps, delta_deg)))
+    def move(self, axis: str, speed_dps: float, delta_deg: float,
+             absolute: bool = False) -> None:
+        """Turn an axis. `absolute` reads the angle as where to end up."""
+        self._jobs.put(_Job("move", (axis, speed_dps, delta_deg, absolute)))
 
     def move_both(self, az_speed: float, az_delta: float, el_speed: float,
-                  el_delta: float) -> None:
-        self._jobs.put(
-            _Job("move_both", (az_speed, az_delta, el_speed, el_delta)))
+                  el_delta: float, absolute: bool = False) -> None:
+        self._jobs.put(_Job(
+            "move_both",
+            (az_speed, az_delta, el_speed, el_delta, absolute)))
 
     def set_gear(self, on: bool) -> None:
         self._jobs.put(_Job("gear", (on,)))
@@ -379,10 +382,13 @@ class MotorWorker(threading.Thread):
             self._emit(EVENT_NOTE,
                        axis + " is now " + where + " deg. Nothing moved.")
         elif job.name == "move":
-            axis, speed, delta = job.args
-            self._await_move([session.begin_move(axis, speed, delta)])
+            axis, speed, delta, absolute = job.args
+            self._await_move([session.begin_move(axis, speed, delta,
+                                                 absolute=absolute)])
         elif job.name == "move_both":
-            self._await_move(list(session.begin_move_both(*job.args)))
+            *halves, absolute = job.args
+            self._await_move(
+                list(session.begin_move_both(*halves, absolute=absolute)))
         elif job.name == "gear":
             gear = session.set_gear(job.args[0])
             word = "on" if gear.geared else "off"

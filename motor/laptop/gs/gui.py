@@ -27,6 +27,11 @@ used:
 
     1 independent   gear off   each motor on its own, one axis at a time,
                                angles at the gearbox output shaft
+
+Each move panel offers both: "turn by" reads the box as a change, the way the
+prompt's `move` always has, and "go to" reads the same number as a
+destination. The subtraction for "go to" happens on the Pico, which is the
+only place that knows where the axis really is.
     2 combined      gear on    both motors through the belt, both axes in
                                one command, angles at the antenna
     3 track         gear on    a target stream the firmware chases
@@ -289,12 +294,17 @@ class App:
                 row=0, column=col, sticky="w", **PAD)
         ttk.Label(one, text="at").grid(row=0, column=2, padx=(10, 2))
         self.m1_speed = self._entry(one, 0, 3, "5")
-        ttk.Label(one, text="deg/s, turn").grid(row=0, column=4, padx=2)
+        ttk.Label(one, text="deg/s,").grid(row=0, column=4, padx=2)
         self.m1_angle = self._entry(one, 0, 5, "45")
         ttk.Label(one, text="deg").grid(row=0, column=6, padx=2)
-        self.b_move_one = ttk.Button(one, text="move", width=10,
+        # Two buttons, one box. "turn by" is the bench move that has always
+        # been here; "go to" reads the same number as a destination.
+        self.b_move_one = ttk.Button(one, text="turn by", width=9,
                                      command=self._move_one)
         self.b_move_one.grid(row=0, column=7, padx=(12, 2))
+        self.b_goto_one = ttk.Button(one, text="go to", width=9,
+                                     command=lambda: self._move_one(True))
+        self.b_goto_one.grid(row=0, column=8, padx=2)
 
         # --- mode 2: both axes, each at its own speed ---
         both = ttk.Frame(holder)
@@ -305,13 +315,16 @@ class App:
             ttk.Label(both, text=axis).grid(row=line, column=0, **PAD)
             ttk.Label(both, text="at").grid(row=line, column=1)
             self.m2_speed[axis] = self._entry(both, line, 2, "5")
-            ttk.Label(both, text="deg/s, turn").grid(row=line, column=3)
+            ttk.Label(both, text="deg/s,").grid(row=line, column=3)
             self.m2_angle[axis] = self._entry(both, line, 4,
                                               "45" if axis == "az" else "20")
             ttk.Label(both, text="deg").grid(row=line, column=5)
-        self.b_move_both = ttk.Button(both, text="move both", width=10,
+        self.b_move_both = ttk.Button(both, text="turn by", width=9,
                                       command=self._move_both)
         self.b_move_both.grid(row=0, column=6, rowspan=2, padx=(12, 2))
+        self.b_goto_both = ttk.Button(both, text="go to", width=9,
+                                      command=lambda: self._move_both(True))
+        self.b_goto_both.grid(row=0, column=7, rowspan=2, padx=2)
 
         # --- mode 3: a placeholder that says so ---
         track = ttk.Frame(holder)
@@ -408,16 +421,17 @@ class App:
             return
         self.worker.zero(axis, deg)
 
-    def _move_one(self) -> None:
+    def _move_one(self, absolute: bool = False) -> None:
         try:
             speed = self._read(self.m1_speed, "speed")
             angle = self._read(self.m1_angle, "angle")
         except motor.UsageError as exc:
             self.note(str(exc))
             return
-        self.worker.move(self.m1_axis.get(), speed, angle)
+        self.worker.move(self.m1_axis.get(), speed, angle,
+                         absolute=absolute)
 
-    def _move_both(self) -> None:
+    def _move_both(self, absolute: bool = False) -> None:
         try:
             values = {
                 axis: (self._read(self.m2_speed[axis], f"{axis} speed"),
@@ -427,7 +441,8 @@ class App:
         except motor.UsageError as exc:
             self.note(str(exc))
             return
-        self.worker.move_both(*values["az"], *values["el"])
+        self.worker.move_both(*values["az"], *values["el"],
+                              absolute=absolute)
 
     def _apply_settings(self) -> None:
         """Send only what differs from what the Pico reports.
@@ -708,7 +723,8 @@ class App:
                        self.b_apply, self.b_save, self.b_defaults):
             widget.state(["!disabled"] if settled else ["disabled"])
 
-        for widget in (self.b_move_one, self.b_move_both):
+        for widget in (self.b_move_one, self.b_move_both,
+                       self.b_goto_one, self.b_goto_both):
             widget.state(["!disabled"] if can_move else ["disabled"])
 
         for value, button in self.r_mode.items():

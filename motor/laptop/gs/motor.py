@@ -55,6 +55,8 @@ READING_WARN_DEG = 5.0
 HELP_TEXT = """\
   move <az|el> <deg/s> <degrees>   turn an axis, + or -
   move az <deg/s> <deg> el <deg/s> <deg>   both at once, each at its own speed
+  goto <az|el> <deg/s> <degrees>   turn TO an angle, not by one
+  goto az <deg/s> <deg> el <deg/s> <deg>   point both at once
   zero [az|el|all] [degrees]       say where it is now
   pos                              where it thinks it is
   stop                             slow to a stop
@@ -78,6 +80,7 @@ HELP_TEXT = """\
   quit                             leave
 
   Angles are relative: 'move az 5 -45' turns back 45 degrees.
+  'goto' is absolute: 'goto az 5 45' points at 45, wherever it started.
   Ctrl-C during a move stops the motor, then waits for its report.
   'gear on' means the belt is fitted and angles are at the antenna;
   'gear off' means each axis on its own, angles at the gearbox shaft."""
@@ -393,17 +396,25 @@ class Console:
     # --- moving -------------------------------------------------------------
 
     def do_move(self, args: list[str]) -> None:
+        self._move_command(args, absolute=False)
+
+    def do_goto(self, args: list[str]) -> None:
+        """The same as move, with the angle read as where to end up."""
+        self._move_command(args, absolute=True)
+
+    def _move_command(self, args: list[str], absolute: bool) -> None:
+        word = "goto" if absolute else "move"
         if len(args) == 3:
             axis = _axis(args[0])
             speed = _number(args[1], "speed")
             angle = _number(args[2], "angle")
-            self.run_move(axis, speed, angle)
+            self.run_move(axis, speed, angle, absolute=absolute)
             return
 
         if len(args) != 6:
             raise UsageError(
-                "move <az|el> <deg/s> <degrees>, or both at once: "
-                "move az <deg/s> <degrees> el <deg/s> <degrees>"
+                f"{word} <az|el> <deg/s> <degrees>, or both at once: "
+                f"{word} az <deg/s> <degrees> el <deg/s> <degrees>"
             )
 
         # Both axes. Either may be typed first, but each only once.
@@ -412,14 +423,14 @@ class Console:
             axis = _axis(axis_word)
             if axis in halves:
                 raise UsageError(
-                    "name each axis once: "
-                    "move az <deg/s> <degrees> el <deg/s> <degrees>"
+                    f"name each axis once: "
+                    f"{word} az <deg/s> <degrees> el <deg/s> <degrees>"
                 )
             halves[axis] = (
                 _number(speed_word, "speed"),
                 _number(angle_word, "angle"),
             )
-        self.run_move_both(*halves["AZ"], *halves["EL"])
+        self.run_move_both(*halves["AZ"], *halves["EL"], absolute=absolute)
 
     def run_move(
         self,
@@ -427,6 +438,7 @@ class Console:
         speed_dps: float,
         delta_deg: float,
         row_hint: bool = True,
+        absolute: bool = False,
     ):
         """One move, start to finish, with the waiting handled.
 
@@ -435,7 +447,8 @@ class Console:
         here and is not worth raising again further up.
         """
         try:
-            plan = self.session.begin_move(axis, speed_dps, delta_deg)
+            plan = self.session.begin_move(axis, speed_dps, delta_deg,
+                                           absolute=absolute)
         except sn.Refused as refused:
             self.say(f"  refused: {refused}")
             return None
@@ -450,7 +463,12 @@ class Console:
         self.report_move(outcome)
 
         if self.results is not None:
-            row = self.results.add(outcome, commanded_deg=delta_deg)
+            # commanded_deg is how far it was asked to turn, so an absolute
+            # move records the journey rather than the destination - the
+            # column means the same thing in every row.
+            commanded = (delta_deg if not absolute
+                         else p.mdeg_to_deg(plan.to_mdeg - plan.from_mdeg))
+            row = self.results.add(outcome, commanded_deg=commanded)
             # Left out when a scripted run is about to ask for the reading
             # itself, which would otherwise print two prompts for the same
             # number.
@@ -465,6 +483,7 @@ class Console:
         az_delta_deg: float,
         el_speed_dps: float,
         el_delta_deg: float,
+        absolute: bool = False,
     ):
         """Both axes in one command, each at its own speed.
 
@@ -474,7 +493,8 @@ class Console:
         """
         try:
             plans = self.session.begin_move_both(
-                az_speed_dps, az_delta_deg, el_speed_dps, el_delta_deg
+                az_speed_dps, az_delta_deg, el_speed_dps, el_delta_deg,
+                absolute=absolute,
             )
         except sn.Refused as refused:
             self.say(f"  refused: {refused}")
@@ -494,7 +514,11 @@ class Console:
             self.report_move(outcome, label=True)
 
         if self.results is not None:
-            commanded = (az_delta_deg, el_delta_deg)
+            commanded = (
+                (az_delta_deg, el_delta_deg) if not absolute
+                else tuple(p.mdeg_to_deg(plan.to_mdeg - plan.from_mdeg)
+                           for plan in plans)
+            )
             rows = [
                 self.results.add(outcome, commanded_deg=deg, note="both axes")
                 for outcome, deg in zip(outcomes, commanded)
@@ -733,6 +757,7 @@ class Console:
 
     COMMANDS = {
         "move": do_move,
+        "goto": do_goto,
         "zero": do_zero,
         "pos": do_pos,
         "stop": do_stop,

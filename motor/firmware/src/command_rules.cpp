@@ -77,8 +77,12 @@ Half half_for(const Command &c, AxisId axis)
 // Check one axis's share and plan it, exactly as a one-axis MOVE is checked.
 // Fills in *m and returns true if it may go; otherwise writes the refusal
 // into d and returns false.
+//
+// `absolute` picks whether h.mdeg is where to end up or how far to turn.
+// Everything after that is identical, which is why MOVE and MOVETO share
+// this.
 bool check_half(const Command &c, AxisId axis, const Half &h,
-                const MachineState &s, Move *m, Decision &d)
+                const MachineState &s, bool absolute, Move *m, Decision &d)
 {
     // Without a zero the soft limits are measured from an unknown origin,
     // which is no protection at all. This is the main thing standing between
@@ -90,7 +94,10 @@ bool check_half(const Command &c, AxisId axis, const Half &h,
     }
 
     const AxisSpec &spec = spec_for(axis, s);
-    switch (plan_move(spec, axis_pos(axis, s), h.mdeg, h.mdps, m)) {
+    const PlanResult planned =
+        absolute ? plan_move_to(spec, axis_pos(axis, s), h.mdeg, h.mdps, m)
+                 : plan_move(spec, axis_pos(axis, s), h.mdeg, h.mdps, m);
+    switch (planned) {
     case PlanResult::BadSpeed:
         say(d, format_err(line_buf(d), MAX_REPLY_LEN, c.id, ErrCode::BadSpeed,
                           axis_name(axis)));
@@ -114,7 +121,7 @@ bool check_half(const Command &c, AxisId axis, const Half &h,
     return true;
 }
 
-Decision do_move(const Command &c, const MachineState &s)
+Decision do_move(const Command &c, const MachineState &s, bool absolute)
 {
     if (c.axis != AxisId::Az && c.axis != AxisId::El) {
         return refuse(c, ErrCode::BadAxis, "");
@@ -131,10 +138,12 @@ Decision do_move(const Command &c, const MachineState &s)
     Decision d;
     Move az_move{};
     Move el_move{};
-    if (az.wanted && !check_half(c, AxisId::Az, az, s, &az_move, d)) {
+    if (az.wanted &&
+        !check_half(c, AxisId::Az, az, s, absolute, &az_move, d)) {
         return d;
     }
-    if (el.wanted && !check_half(c, AxisId::El, el, s, &el_move, d)) {
+    if (el.wanted &&
+        !check_half(c, AxisId::El, el, s, absolute, &el_move, d)) {
         return d;
     }
 
@@ -145,7 +154,9 @@ Decision do_move(const Command &c, const MachineState &s)
     d.az_move = az_move;
     d.el_move = el_move;
 
-    say(d, format_ack(line_buf(d), MAX_REPLY_LEN, c.id, Verb::Move));
+    // The verb is echoed as it was sent, so the laptop can tell which of the
+    // two it is reading the answer to.
+    say(d, format_ack(line_buf(d), MAX_REPLY_LEN, c.id, c.verb));
 
     // PLAN carries the end angle after rounding to whole steps, which is not
     // simply start plus commanded: 10 degrees is 444 steps, or 9.990 degrees.
@@ -395,7 +406,8 @@ Decision decide(const Command &c, const MachineState &s)
     }
 
     switch (c.verb) {
-    case Verb::Move:     return do_move(c, s);
+    case Verb::Move:     return do_move(c, s, false);
+    case Verb::MoveTo:   return do_move(c, s, true);
     case Verb::Stop:     return do_stop_when_idle(c);
     case Verb::Estop:    return do_stop_when_idle(c);
     case Verb::Zero:     return do_zero(c, s);

@@ -370,17 +370,23 @@ class Session:
     # --- moving -------------------------------------------------------------
 
     def begin_move(
-        self, axis: str, speed_dps: float, delta_deg: float
+        self, axis: str, speed_dps: float, delta_deg: float,
+        absolute: bool = False,
     ) -> p.Plan:
-        """Start a move and return its plan. Does not wait for it to finish."""
+        """Start a move and return its plan. Does not wait for it to finish.
+
+        `absolute` reads the angle as where to end up rather than how far to
+        turn, which is MOVETO rather than MOVE.
+        """
         cmd_id = self.ids.next()
-        line = p.move(cmd_id, axis, speed_dps, delta_deg)
-        self.request(line, cmd_id, (p.Ack,), "MOVE")
+        line = (p.move_to(cmd_id, axis, speed_dps, delta_deg) if absolute
+                else p.move(cmd_id, axis, speed_dps, delta_deg))
+        self.request(line, cmd_id, (p.Ack,), "MOVETO" if absolute else "MOVE")
         return self._await(
             cmd_id,
             (p.Plan,),
             self.clock() + self.timeout_s,
-            "the plan for MOVE",
+            "the plan for MOVETO" if absolute else "the plan for MOVE",
         )
 
     def begin_move_both(
@@ -389,23 +395,29 @@ class Session:
         az_delta_deg: float,
         el_speed_dps: float,
         el_delta_deg: float,
+        absolute: bool = False,
     ) -> tuple[p.Plan, p.Plan]:
         """Start both axes in one command. Returns their plans, azimuth first.
 
         Each axis runs at its own speed. Either half being refused refuses
-        the whole command, and nothing moves.
+        the whole command, and nothing moves. `absolute` picks MOVETO over
+        MOVE, as in `begin_move`.
         """
         cmd_id = self.ids.next()
-        line = p.move_both(
+        builder = p.move_to_both if absolute else p.move_both
+        line = builder(
             cmd_id, az_speed_dps, az_delta_deg, el_speed_dps, el_delta_deg
         )
-        self.request(line, cmd_id, (p.Ack,), "MOVE")
+        self.request(line, cmd_id, (p.Ack,),
+                     "MOVETO" if absolute else "MOVE")
         deadline = self.clock() + self.timeout_s
+        verb = "MOVETO" if absolute else "MOVE"
         az = self._await(
-            cmd_id, (p.Plan,), deadline, "the azimuth plan for MOVE", "AZ"
+            cmd_id, (p.Plan,), deadline, f"the azimuth plan for {verb}", "AZ"
         )
         el = self._await(
-            cmd_id, (p.Plan,), deadline, "the elevation plan for MOVE", "EL"
+            cmd_id, (p.Plan,), deadline, f"the elevation plan for {verb}",
+            "EL"
         )
         return az, el
 

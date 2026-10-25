@@ -7,6 +7,8 @@
 // The commands, one per line:
 //
 //   MOVE,<id>,<AZ|EL>,<speed_mdps>,<delta_mdeg>   turn an axis
+//   MOVETO,<id>,<AZ|EL>,<speed_mdps>,<mdeg>       turn TO an angle
+//   MOVETO,<id>,AZ,<speed>,<mdeg>,EL,<speed>,<mdeg>
 //   MOVE,<id>,AZ,<speed>,<delta>,EL,<speed>,<delta>
 //                                                 turn both at once, each
 //                                                 at its own speed (either
@@ -35,6 +37,10 @@
 // so the id is how the laptop tells which reply belongs to which command, and
 // which move each row of the results came from.
 //
+// MOVE's angle is a change from where the axis is now; MOVETO's is where to
+// end up, measured from the zero. Everything else about them is the same,
+// including both being able to name each axis once with its own speed.
+//
 // Angles and speeds arrive as whole millidegrees, never as decimals. The
 // laptop turns "45.5" into 45500 before sending, which keeps this parser to
 // integers only: no floating point, no locale surprises, nothing that rounds
@@ -46,6 +52,7 @@
 enum class Verb {
     None,
     Move,
+    MoveTo,
     Stop,
     Estop,
     Zero,

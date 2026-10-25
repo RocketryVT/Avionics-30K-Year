@@ -73,6 +73,23 @@ struct Move {
 PlanResult plan_move(const AxisSpec &axis, int32_t pos_steps,
                      int32_t delta_mdeg, int32_t speed_mdps, Move *out);
 
+// The same, but the angle is where to END UP rather than how far to turn.
+//
+// Both go through the same checks and fill in the same Move, so an absolute
+// move and a relative one of the same length behave identically; only the
+// arithmetic at the front differs.
+//
+// The subtraction belongs here rather than on the laptop because the step
+// count is the only record of where the axis is, and it lives on this side.
+// A laptop working out "target minus where I last heard it was" would be
+// using a copy that is up to half a second old.
+//
+// Rounding happens once, in steps, for the same reason plan_move rounds
+// once: going via a delta in millidegrees would round on the way in and
+// again on the way out, and could land a step away from the angle asked for.
+PlanResult plan_move_to(const AxisSpec &axis, int32_t pos_steps,
+                        int32_t target_mdeg, int32_t speed_mdps, Move *out);
+
 // How long to wait before taking step number i, counting from 0.
 //
 // This is the one function the motor loop calls over and over, so it answers

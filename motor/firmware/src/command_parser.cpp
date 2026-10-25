@@ -189,6 +189,9 @@ Command parse_command(const char *line)
     if (is_word(f[0], "MOVE")) {
         verb        = Verb::Move;
         want_fields = 5;  // or 8 for both axes, handled below
+    } else if (is_word(f[0], "MOVETO")) {
+        verb        = Verb::MoveTo;
+        want_fields = 5;  // or 8 for both axes, handled below
     } else if (is_word(f[0], "STOP")) {
         verb        = Verb::Stop;
         want_fields = 2;
@@ -230,7 +233,8 @@ Command parse_command(const char *line)
     }
 
     const bool zero_with_angle = (verb == Verb::Zero && n == 4);
-    const bool move_both       = (verb == Verb::Move && n == 8);
+    const bool move_both =
+        ((verb == Verb::Move || verb == Verb::MoveTo) && n == 8);
     const bool gear_with_mode  = (verb == Verb::Gear && n == 3);
     if (n != want_fields && !zero_with_angle && !move_both && !gear_with_mode) {
         return fail(ParseError::Syntax);
@@ -247,7 +251,8 @@ Command parse_command(const char *line)
     c.id   = static_cast<uint16_t>(id);
 
     switch (verb) {
-    case Verb::Move: {
+    case Verb::Move:
+    case Verb::MoveTo: {
         ParseError e = read_move(&f[2], &c.axis, &c.mdps, &c.mdeg);
         if (e == ParseError::None && move_both) {
             e = read_move(&f[5], &c.axis2, &c.mdps2, &c.mdeg2);

@@ -74,6 +74,8 @@ New machine? Do `docs/SETUP.md` first.
 | --- | --- |
 | `move <az\|el> <deg/s> <deg>` | Turn one axis. `move az 5 45` turns azimuth 45° at 5°/s |
 | `move az <deg/s> <deg> el <deg/s> <deg>` | Turn both at once, each at its own speed. Either axis may come first |
+| `goto <az\|el> <deg/s> <deg>` | Turn **to** an angle rather than **by** one. `goto az 5 45` points at 45 whatever it started from |
+| `goto az <deg/s> <deg> el <deg/s> <deg>` | Point both at once |
 | `stop` | Slow to a stop |
 | `estop` | Stop at once. Loses the zero, so re-zero afterwards |
 | Ctrl-C during a move | Same as `stop`, then waits for the report. Twice stops waiting |
@@ -97,9 +99,14 @@ New machine? Do `docs/SETUP.md` first.
 | `help` | List these |
 | `quit` | Leave (`exit` works too) |
 
-Angles are relative: `move az 5 -45` turns back 45°. Every move is refused
-until the axes have been zeroed, because there are no limit switches and the
-soft limits are measured from the zero.
+`move` is relative: `move az 5 -45` turns back 45°. `goto` is absolute,
+measured from the zero: `goto az 5 45` points at 45° wherever it started, and
+the Pico works out how far that is, because the step count is the only record
+of where the axis is and it lives on that side. Asking `goto` for the angle it
+is already at is refused as zero steps.
+
+Every move is refused until the axes have been zeroed, because there are no
+limit switches and the soft limits are measured from the zero.
 
 Acceleration and travel can be tuned at the prompt with no reflash. Saved
 settings live on the Pico and survive restarts and reflashes. The exception

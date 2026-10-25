@@ -9,6 +9,7 @@ The two directions, one line each, "\n" terminated:
 
     laptop -> Pico                      Pico -> laptop
     MOVE,<id>,<AZ|EL>,<mdps>,<mdeg>     ACK,<id>,<verb>
+    MOVETO,<id>,<AZ|EL>,<mdps>,<mdeg>
     STOP,<id>                           PLAN,<id>,<axis>,<steps>,...
     ESTOP,<id>                          DONE,<id>,<axis>,<OK|ABORT>,...
     ZERO,<id>,<AZ|EL|ALL>[,<mdeg>]      POS,<id>,<az>,<el>,...
@@ -26,6 +27,13 @@ A MOVE can also turn both axes at once, each at its own speed:
 `MOVE,<id>,AZ,<mdps>,<mdeg>,EL,<mdps>,<mdeg>`. It is answered with one ACK,
 a PLAN for each axis, and later a DONE for each - both DONEs only once the
 slower axis has stopped.
+
+MOVETO is the same command with the angle read as **where to end up** rather
+than how far to turn, and takes both shapes too. The Pico does the
+subtraction, because the step count is the only record of where the axis is
+and it lives on that side - a laptop working out "target minus where I last
+heard it was" would be using a copy up to half a second old. The ACK echoes
+whichever verb was sent, so the two can be told apart.
 
 SET changes one setting on one axis - ACCEL, or the MIN or MAX travel limit
 - until the Pico restarts. SAVE keeps the settings in flash, DEFAULTS goes
@@ -209,6 +217,33 @@ def move(cmd_id: int, axis: str, speed_dps: float, delta_deg: float) -> str:
     """
     _check_id(cmd_id)
     return f"MOVE,{cmd_id},{_move_half(axis, speed_dps, delta_deg)}"
+
+
+def move_to(cmd_id: int, axis: str, speed_dps: float, deg: float) -> str:
+    """Turn an axis until it is pointing at `deg`, measured from the zero.
+
+    The same as `move` in every way but what the angle means. The Pico works
+    out how far that is from where the axis actually is, checks it against
+    the soft limits, and reports the end angle it will really stop at in its
+    PLAN - which is the nearest whole step, not necessarily the angle asked
+    for.
+    """
+    _check_id(cmd_id)
+    return f"MOVETO,{cmd_id},{_move_half(axis, speed_dps, deg)}"
+
+
+def move_to_both(
+    cmd_id: int,
+    az_speed_dps: float,
+    az_deg: float,
+    el_speed_dps: float,
+    el_deg: float,
+) -> str:
+    """Point both axes, each at its own speed. Absolute, like `move_to`."""
+    _check_id(cmd_id)
+    az = _move_half("AZ", az_speed_dps, az_deg)
+    el = _move_half("EL", el_speed_dps, el_deg)
+    return f"MOVETO,{cmd_id},{az},{el}"
 
 
 def move_both(
