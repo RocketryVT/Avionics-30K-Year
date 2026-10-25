@@ -301,8 +301,11 @@ constexpr AxisSpec AZ_SPEC = {
     9,       // steps_den     -> 44.444 steps per degree
     -180000, // min_mdeg      -180 degrees
     180000,  // max_mdeg      +180 degrees
-    false,   // invert_dir    `move az` turned the right way at the bench,
-             //               25 Oct 2026
+    true,    // invert_dir    flipped at the bench, 25 Oct 2026: `move az 45
+             //               10` went the wrong way. At the time the driver
+             //               turned one way for every command, + or -, so
+             //               confirm with `move az 5 10` / `move az 5 -10`
+             //               once it reverses.
     V_START_MDPS,
     135000,  // accel_mdps2   135 deg/sec/sec (aiming for 180)
     ACCEL_MIN_MDPS2,

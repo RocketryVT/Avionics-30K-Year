@@ -264,6 +264,16 @@ it was done. Nothing here is pushed.
   same place whichever way it goes, so it cannot tell you the direction.
 - Azimuth direction: "move az" turned the right way. Not yet checked in the
   other gear mode, where the azimuth gears could reverse it.
+- Later the same day azimuth turned the SAME way for every command: move +10,
+  move -10, goto 0, goto -10, goto 10. Running the real firmware on a PC
+  showed the Pico sends opposite direction signals for + and -, the same as
+  it does for elevation, which reverses fine. So the azimuth driver is not
+  acting on its direction signal. Switches checked and match elevation's;
+  wiring checked.
+- Azimuth direction flipped anyway (gear off only), on request: "move az 45
+  10" went the wrong way. If the driver still turns one way for everything,
+  this setting cannot change that. Confirm with "move az 5 10" then "move az
+  5 -10" once it reverses.
 - Elevation can now go down to -25 degrees, in both gear modes. This needed a
   code change because the prompt can only ever narrow the travel, never widen
   it - with no limit switches, widening is meant to be done on purpose.
