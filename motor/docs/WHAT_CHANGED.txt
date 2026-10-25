@@ -234,6 +234,25 @@ it was done. Nothing here is pushed.
 - Found while testing: the direction boxes were disabled until tracking was
   armed, which is backwards - you type where to point and then arm.
 
+- Added a box to type commands into, under the reference. Before this the
+  window told you about commands with nowhere to type them, and anything the
+  buttons did not cover meant closing the window and opening the text prompt
+  instead (only one program can hold the serial port at a time).
+- It runs the line through the text prompt's own code, so a command means
+  exactly the same thing in both places - same parsing, same error messages,
+  same results file. The things the buttons do not cover now work in the
+  window: sweep, random, true, note, rows, pin.
+- Up and down arrows walk back through what you have typed.
+- A typed move can be stopped by the STOP button, which took a small change:
+  the window's wait for a move to finish is the interruptible one, so a typed
+  "move az 1 360" cannot hold everything up for six minutes with the stop
+  unable to reach it.
+- "stop" and "estop" typed in the box skip the queue the same way the buttons
+  do, since a stop waiting behind the move it is meant to cut short would be
+  no stop at all.
+- The window now takes --log as well, so the typed true/note/rows have a
+  results file to write to.
+
 
 HOW IT WAS CHECKED
 ==================
@@ -245,7 +264,7 @@ HOW IT WAS CHECKED
   record, absolute moves, and the chase loop driven thousands of times
   against still targets, moving targets, targets it cannot catch, and a
   stalled loop.
-- 428 checks on the laptop software, including the window built and driven
+- 464 checks on the laptop software, including the window built and driven
   with no screen attached, and a pretend Pico standing in for the real one.
 - None of it has been run on the actual hardware. That is the next step.
 
@@ -260,8 +279,14 @@ In this order, because each step rules something out:
    45.000.
 3. Fit the belt. Mode 2, gear on. Check both axes again - if a move comes out
    1.43 or 2.29 times too far, the gearing is the wrong way round.
-4. Mode 3 with a typed direction. Watch it slew and settle. Then change the
-   direction and watch it re-aim without stopping.
+4. Mode 3 with a typed direction. Watch it slew and settle.
+   Then, WHILE IT IS STILL MOVING, change the numbers and press "point here"
+   again. It should curve toward the new direction without ever coming to a
+   stop. This is the thing modes 1 and 2 will not let you do: there, a
+   second move while one is running is refused. In mode 3 new directions
+   arriving mid-move is the normal case, and with a typed direction the same
+   target is being re-sent five times a second anyway - pressing the button
+   just changes the number being sent.
 5. Pull the USB cable mid-track and check the motors ramp down rather than
    carrying on.
 6. Then a simulated flight.

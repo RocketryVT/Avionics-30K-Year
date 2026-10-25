@@ -43,6 +43,25 @@ Choosing a mode changes the gearing, **which costs both axes their zero**,
 so it asks first. Modes 2 and 3 are both `gear on`, so moving between them
 costs nothing.
 
+Typing commands
+---------------
+
+The commands panel lists what each command does *and when you would reach
+for it* - the part that is hard to work out from a list. It comes from
+`command_help.py`, which a test holds against the prompt's real command
+table, so it cannot drift and no command can be added without a line.
+
+Under it is a box to type them in. It runs the line through the prompt's own
+handling (`_GuiConsole` in gui_worker.py), so a command means the same thing
+in both places, and the things the buttons do not cover - `sweep`, `random`,
+`true`, `note`, `rows`, `pin` - work here too. Up and down walk back through
+what has been typed.
+
+`stop` and `estop` typed in the box go the way the buttons send them,
+jumping the job queue, because a stop waiting behind the move it is meant to
+cut short would be no stop at all.
+
+
 Four rules it holds to
 ----------------------
 
@@ -51,8 +70,9 @@ Four rules it holds to
    than keeping a copy of `motor_config.hpp`: a window showing a remembered
    position is a window that disagrees with the machine.
 2. Every control is disabled while a command is outstanding, except the two
-   stops. The prompt gets that for free by being a prompt; here it has to be
-   done on purpose, or three fast clicks queue up three surprises.
+   stops and the command box. The prompt gets that for free by being a
+   prompt; here it has to be done on purpose, or three fast clicks queue up
+   three surprises. The box stays live so `stop` can always be typed.
 3. The stops are always reachable, and they jump the queue in the worker. No
    limit switches, no encoder, and geared azimuth slews at 79 deg/s.
 4. A move is refused until the axes are zeroed, so the window says so
@@ -73,6 +93,7 @@ from gs import command_help
 from gs import gui_worker as gw
 from gs import motor
 from gs import protocol as p
+from gs import results_file
 from gs import tracking
 
 # How often the Tk thread looks for events from the worker. Well under the
@@ -83,6 +104,18 @@ DRAIN_MS = 100
 # Lines kept in the log pane. A long bench session would otherwise grow it
 # without limit, and nobody scrolls back past a few hundred.
 LOG_LINES = 600
+
+# Typed commands that must not wait their turn behind whatever is running.
+# Everything else goes to the worker's job queue, where a long move is ahead
+# of it; these two go to the flags the worker checks while it waits, which is
+# the same path the buttons use.
+TYPED_URGENT = {"stop": "stop", "estop": "estop"}
+
+# Typed commands with nothing sensible to do in a window.
+TYPED_IGNORED = {"quit", "exit"}
+
+# How many typed lines the up arrow can walk back through.
+HISTORY = 50
 
 MODE_INDEPENDENT = 1
 MODE_COMBINED = 2
@@ -406,6 +439,9 @@ class App:
         self.log.tag_configure("out", foreground="#0a5")
         self.log.tag_configure("in", foreground="#222")
         self.log.tag_configure("note", foreground="#06c")
+        # A line somebody typed, and the prompt's answer to it.
+        self.log.tag_configure("typed", foreground="#a0a")
+        self.log.tag_configure("said", foreground="#555")
 
         commands = ttk.LabelFrame(self.root,
                                   text="commands, and when to use them")
@@ -425,6 +461,25 @@ class App:
         cbar = ttk.Scrollbar(commands, orient="vertical", command=text.yview)
         cbar.grid(row=0, column=1, sticky="ns")
         text.configure(yscrollcommand=cbar.set)
+
+        # And somewhere to type them. Under the reference rather than beside
+        # it, so it reads as "here is what they do, here is where they go".
+        typing = ttk.Frame(commands)
+        typing.grid(row=1, column=0, columnspan=2, sticky="ew", **PAD)
+        typing.columnconfigure(1, weight=1)
+        ttk.Label(typing, text="motor>", font=self.mono).grid(
+            row=0, column=0, padx=(0, 4))
+        self.e_cmd = ttk.Entry(typing, font=self.mono)
+        self.e_cmd.grid(row=0, column=1, sticky="ew")
+        self.e_cmd.bind("<Return>", self._typed)
+        self.e_cmd.bind("<Up>", lambda _e: self._recall(-1))
+        self.e_cmd.bind("<Down>", lambda _e: self._recall(1))
+        ttk.Label(typing, text="same as the prompt. The STOP button is the "
+                               "one that jumps the queue.").grid(
+            row=1, column=0, columnspan=2, sticky="w", pady=(2, 0))
+
+        self._history: list[str] = []
+        self._recall_at = 0
 
     def _build_stops(self, row: int) -> None:
         frame = ttk.Frame(self.root)
@@ -452,6 +507,41 @@ class App:
                            padx=6, pady=(4, 6))
 
     # --- commands ----------------------------------------------------------
+
+    def _typed(self, _event=None) -> None:
+        """Run the line in the box, as the prompt would."""
+        text = self.e_cmd.get().strip()
+        self.e_cmd.delete(0, "end")
+        if not text:
+            return
+
+        if not self._history or self._history[-1] != text:
+            self._history.append(text)
+            del self._history[:-HISTORY]
+        self._recall_at = len(self._history)
+
+        self.append("$", text)
+
+        word = text.split()[0].lower()
+        if word in TYPED_URGENT:
+            # Sent the same way the buttons send it, so it is not stuck
+            # behind a move that is still running.
+            getattr(self.worker, TYPED_URGENT[word])()
+            return
+        if word in TYPED_IGNORED:
+            self.note("close the window instead")
+            return
+        self.worker.run_line(text)
+
+    def _recall(self, step: int) -> None:
+        """Up and down through what has been typed."""
+        if not self._history:
+            return
+        self._recall_at = max(0, min(len(self._history),
+                                     self._recall_at + step))
+        self.e_cmd.delete(0, "end")
+        if self._recall_at < len(self._history):
+            self.e_cmd.insert(0, self._history[self._recall_at])
 
     def _reconnect(self) -> None:
         self.note("reconnecting...")
@@ -666,9 +756,9 @@ class App:
                 elif kind == gw.EVENT_NOTE:
                     self.note(payload)
                 elif kind == gw.EVENT_MOVE:
-                    self._move_began(payload)
+                    self._move_began(*payload)
                 elif kind == gw.EVENT_DONE:
-                    self._move_ended(payload)
+                    self._move_ended(*payload)
         except Exception:
             pass  # queue.Empty, or the window is going away
 
@@ -678,9 +768,13 @@ class App:
         self._show_progress()
         self.root.after(DRAIN_MS, self._drain)
 
-    def _move_began(self, plans) -> None:
+    def _move_began(self, plans, narrate: bool = True) -> None:
         self._move_from = self.clock()
         self._move_est_s = max(plan.est_s for plan in plans)
+        # A typed move has already had its plan printed by the prompt's own
+        # handling; only the progress bar is wanted here.
+        if not narrate:
+            return
         for plan in plans:
             self.note(
                 f"plan {plan.axis.lower()} {plan.steps:+d} steps  "
@@ -690,9 +784,12 @@ class App:
                 f"{'  (too short to reach that speed)' if plan.triangular else ''}"
             )
 
-    def _move_ended(self, outcomes) -> None:
+    def _move_ended(self, outcomes, narrate: bool = True) -> None:
         self._move_from = None
         self.progress.configure(value=0)
+        self.v_progress.configure(text="")
+        if not narrate:
+            return
         for outcome in outcomes:
             done = outcome.done
             self.note(
@@ -717,7 +814,8 @@ class App:
             text=f"{gone:4.1f} s of about {est:.1f} s predicted")
 
     def append(self, direction: str, text: str) -> None:
-        tag = {">": "out", "<": "in"}.get(direction, "note")
+        tag = {">": "out", "<": "in", "$": "typed",
+               "|": "said"}.get(direction, "note")
         self.log.configure(state="normal")
         self.log.insert("end", f"{direction} {text}\n", tag)
         extra = int(self.log.index("end-1c").split(".")[0]) - LOG_LINES
@@ -904,15 +1002,31 @@ def build_parser() -> argparse.ArgumentParser:
         help="serial port, such as COM5. Left out, the Pico is found by "
         "itself",
     )
+    parser.add_argument(
+        "--log",
+        nargs="?",
+        const="",
+        metavar="FILE",
+        help="open a results file, so the typed `true`, `note` and `rows` "
+        "have somewhere to write. Give --log with no name for a dated one "
+        "in logs/",
+    )
     return parser
 
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
 
+    results = None
+    if args.log is not None:
+        path = args.log or results_file.default_path()
+        results = results_file.ResultsFile(path=path)
+        results.write()  # so the file exists from the start
+        print(f"logging to {path}")
+
     # The worker opens the port itself, on its own thread, so a Pico that is
     # not plugged in leaves a window saying so rather than no window at all.
-    worker = gw.MotorWorker(port=args.port)
+    worker = gw.MotorWorker(port=args.port, results=results)
     worker.start()
 
     root = tk.Tk()

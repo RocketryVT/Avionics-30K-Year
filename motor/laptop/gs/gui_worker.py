@@ -13,6 +13,13 @@ it owns the session: the loop has to be ticked from the thread that holds the
 port. The window picks a source and a rate and says go; everything after that
 happens here.
 
+It also holds a `motor.Console` - the text prompt's own command handling - so
+a line typed in the window means exactly what it would mean at the prompt,
+with the same parsing, the same usage errors and the same results file. Only
+one thing is overridden: the wait for a move to finish, which has to be the
+interruptible one so the STOP button can reach a typed `move` the same way it
+reaches a clicked one.
+
 Both directions go through `queue.Queue`, which is the only thing shared.
 The worker never imports tkinter and never touches a widget; the window
 never touches the session. That split is what keeps the UI responsive, and
@@ -43,6 +50,7 @@ import threading
 import time
 from dataclasses import dataclass, field, replace
 
+from gs import motor
 from gs import protocol as p
 from gs import session as sn
 from gs import targets as tg
@@ -164,6 +172,70 @@ class _Job:
     args: tuple = field(default_factory=tuple)
 
 
+class _Lines:
+    """Catches what the prompt prints and hands it over a line at a time.
+
+    `motor.Console` writes with `print(..., file=out)`, so all it needs is
+    something with `write`. Buffered until a newline because print sends the
+    text and the newline separately.
+    """
+
+    def __init__(self, emit):
+        self._emit = emit
+        self._held = ""
+
+    def write(self, text: str) -> int:
+        self._held += text
+        while "\n" in self._held:
+            line, _, self._held = self._held.partition("\n")
+            self._emit(line)
+        return len(text)
+
+    def flush(self) -> None:
+        if self._held:
+            self._emit(self._held)
+            self._held = ""
+
+
+class _NoInput:
+    """Stands in for stdin, and always says nothing was typed.
+
+    `sweep pause` and `random pause` ask for a protractor reading between
+    moves. There is no terminal behind a window, so reading real stdin would
+    block the worker for ever. An empty answer is what the prompt already
+    treats as "skip this one".
+    """
+
+    def readline(self) -> str:
+        return ""
+
+    def isatty(self) -> bool:
+        return False
+
+
+class _GuiConsole(motor.Console):
+    """The prompt's own command handling, driven from the window.
+
+    Subclassed for one reason: `_wait_out` is where the prompt sits waiting
+    for a move to finish, and the window needs that wait to be the worker's
+    interruptible one. Otherwise a typed `move az 1 360` would hold the
+    worker for six minutes with the STOP button unable to reach it, which
+    would break the rule that the stops always work.
+
+    Everything else - parsing, usage errors, the results file, the scripted
+    runs - is the prompt's, unchanged, so a typed command here behaves
+    exactly as it does there.
+    """
+
+    def __init__(self, session, worker, out):
+        super().__init__(session, out=out)
+        self._worker = worker
+        self.stdin = _NoInput()
+
+    def _wait_out(self, plans):
+        return self._worker.await_move_outcomes(plans)
+
+
 class MotorWorker(threading.Thread):
     """Owns one Session and answers for it.
 
@@ -174,7 +246,7 @@ class MotorWorker(threading.Thread):
     """
 
     def __init__(self, port: str | None = None, open_session=None,
-                 clock=time.monotonic):
+                 clock=time.monotonic, results=None):
         super().__init__(daemon=True, name="motor-worker")
         self.events: queue.Queue = queue.Queue()
         self._jobs: queue.Queue = queue.Queue()
@@ -198,6 +270,14 @@ class MotorWorker(threading.Thread):
         # driven from the thread that owns the port.
         self._loop: tracking.TrackingLoop | None = None
         self._source: tg.TargetSource | None = None
+
+        # The prompt's command handling, for lines typed in the window. Built
+        # when the port opens, because it needs the session.
+        self._console: _GuiConsole | None = None
+
+        # Results file for `true`, `note` and `rows`, when the window was
+        # started with --log. Handed to the console when it is built.
+        self.results = results
 
     # --- the UI thread's side ----------------------------------------------
 
@@ -269,6 +349,17 @@ class MotorWorker(threading.Thread):
         """Move a manual source's target. Ignored by any other source."""
         self._jobs.put(_Job("track_point", (az_deg, el_deg)))
 
+    # --- typed commands ----------------------------------------------------
+
+    def run_line(self, text: str) -> None:
+        """Run one line exactly as the motor> prompt would.
+
+        `stop`, `estop` and `quit` are picked off before they get here - see
+        TYPED_URGENT in gui.py. Everything else goes through the prompt's own
+        handling, so what is typed means the same in both places.
+        """
+        self._jobs.put(_Job("line", (text,)))
+
     # --- the worker's side -------------------------------------------------
 
     def _emit(self, kind: str, payload) -> None:
@@ -292,6 +383,14 @@ class MotorWorker(threading.Thread):
         session.on_record = self._note_record
         self._session = session
 
+        # The window's own copy of the prompt. Its output goes to the log
+        # pane, prefixed so a reply to something typed is easy to pick out
+        # from the raw wire lines around it.
+        self._console = _GuiConsole(
+            session, self, out=_Lines(lambda line: self._emit(
+                EVENT_LINE, ("|", line))))
+        self._console.results = self.results
+
         self._set_state(connected=True, port=port or "", error="",
                         rebooted=False)
 
@@ -313,6 +412,7 @@ class MotorWorker(threading.Thread):
         self._emit(EVENT_LINE, ("<", text if text is not None else _record_text(record)))
 
     def _close(self) -> None:
+        self._console = None
         if self._session is not None:
             try:
                 self._session.close()
@@ -390,7 +490,15 @@ class MotorWorker(threading.Thread):
             return True
         return False
 
-    def _await_move(self, plans) -> None:
+    def await_move_outcomes(self, plans):
+        """The interruptible wait, for _GuiConsole._wait_out.
+
+        Same contract as the prompt's own `_wait_out`: the outcomes in plan
+        order, or None if it was given up on.
+        """
+        return self._await_move(plans, narrate=False)
+
+    def _await_move(self, plans, narrate: bool = True):
         """Wait out every axis of a move, staying able to stop it.
 
         `await_done` is documented as safe to call again after a Timeout - the
@@ -401,9 +509,12 @@ class MotorWorker(threading.Thread):
         """
         session = self._session
         if session is None:
-            return
+            return None
 
-        self._emit(EVENT_MOVE, list(plans))
+        # `narrate` is false for a typed move: the prompt prints its own plan
+        # and done lines, and saying the same thing twice in one log pane is
+        # worse than saying it once. The progress bar still gets its events.
+        self._emit(EVENT_MOVE, (list(plans), narrate))
         deadline = self._clock() + sn.move_timeout_s(*plans)
         outcomes = []
 
@@ -417,14 +528,15 @@ class MotorWorker(threading.Thread):
                         # The window is closing with an axis still turning.
                         # Leaving it running is worse than losing the zero.
                         session.estop()
-                        return
+                        return None
                     if self._clock() > deadline:
                         raise
                     continue
                 outcomes.append(sn.MoveOutcome(plan, done))
                 break
 
-        self._emit(EVENT_DONE, outcomes)
+        self._emit(EVENT_DONE, (outcomes, narrate))
+        return [o.done for o in outcomes]
 
     def _run_job(self, job: _Job) -> None:
         session = self._session
@@ -467,6 +579,13 @@ class MotorWorker(threading.Thread):
             self._start_tracking(session, *job.args)
         elif job.name == "track_stop":
             self._stop_tracking("disarmed")
+        elif job.name == "line":
+            if self._console is None:
+                self._emit(EVENT_NOTE, "not connected")
+            else:
+                # Straight through the prompt's own handling, which catches
+                # its own usage errors and refusals and prints them.
+                self._console.run_line(job.args[0])
         elif job.name == "track_point":
             if isinstance(self._source, tg.ManualSource):
                 self._source.point(*job.args)
