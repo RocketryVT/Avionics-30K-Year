@@ -18,6 +18,12 @@ an error with no id (below) can be attributed at all.
 replies arrive long after the command, with heartbeats in between. Every
 reply carries the id of the command that caused it.
 
+**Keeping the tracking stream out of the way.** While tracking, the Pico
+sends a TRK line a few times a second with an id of 0. Nobody asked for it,
+so it goes to `on_chatter` like the heartbeat does rather than being kept as
+somebody's answer - otherwise it would fill the spare-replies list and be
+mistaken for a reply to whatever came next.
+
 **Noticing a Pico that restarted.** PING and the heartbeat both report how
 long the Pico has been up. If that goes backwards it rebooted, which means
 it has forgotten where the antenna is. Moving after that without a fresh
@@ -104,6 +110,15 @@ class Session:
         # heartbeat, the startup banner, `[fatal]` messages.
         self.on_chatter = None
 
+        # Called with every line sent, and with every record read, whatever
+        # it is. These are for a log of the conversation itself - the GUI's
+        # log pane - where `on_chatter` only carries the lines nobody asked
+        # for. All three are called on whichever thread is driving the
+        # session, so a handler should hand the line off rather than do work
+        # in it.
+        self.on_send = None
+        self.on_record = None
+
         self._buf = b""
         # Replies read while waiting for a different one.
         self._spare: list[p.Reply] = []
@@ -181,8 +196,16 @@ class Session:
                 self.rebooted = True
             self._last_uptime_s = uptime_s
 
-        if isinstance(record, (p.Mstat, p.Info)) and self.on_chatter is not None:
+        # An unprompted TRK is chatter in the same sense MSTAT is: nobody
+        # asked for it. Dropping it would throw away the only report that
+        # arrives while an axis is turning.
+        unasked = isinstance(record, (p.Mstat, p.Info)) or (
+            isinstance(record, p.Trk) and record.id == 0
+        )
+        if unasked and self.on_chatter is not None:
             self.on_chatter(record)
+        if self.on_record is not None:
+            self.on_record(record)
 
         return record
 
@@ -210,8 +233,21 @@ class Session:
     # --- sending ------------------------------------------------------------
 
     def _send(self, line: str) -> None:
-        self.conn.write(p.encode(line))
-        self.conn.flush()
+        # Wrapped the same way _read_some() wraps a failed read: a port that
+        # went away raises whatever pyserial feels like, and everything above
+        # here is written to expect SessionError. Without this a cable pulled
+        # between two commands comes out as a bare OSError and takes the
+        # caller down with it.
+        try:
+            self.conn.write(p.encode(line))
+            self.conn.flush()
+        except p.CommandError:
+            raise  # ours, and a fault in the caller rather than the port
+        except Exception as exc:
+            raise SessionError(f"lost the connection: {exc}") from exc
+
+        if self.on_send is not None:
+            self.on_send(line)
 
     def _await(
         self,
@@ -243,7 +279,9 @@ class Session:
                 return record
             if _is_error_for(record, cmd_id):
                 raise Refused(record)
-            if not isinstance(record, (p.Mstat, p.Info)):
+            if not isinstance(record, (p.Mstat, p.Info)) and not (
+                isinstance(record, p.Trk) and record.id == 0
+            ):
                 # A reply to something else - most likely the DONE of a move
                 # whose wait was given up. Kept rather than dropped, so
                 # whoever is waiting for it can still find it.
@@ -325,20 +363,69 @@ class Session:
         cmd_id = self.ids.next()
         return self.request(p.settings(cmd_id), cmd_id, (p.Cfg,), "SETTINGS")
 
+    def track(self, on: bool | None = None) -> p.Trk:
+        """Ask whether tracking is armed, or arm and disarm it.
+
+        Returns what the Pico is doing afterwards. Arming is refused unless
+        both axes are zeroed; disarming never is.
+        """
+        cmd_id = self.ids.next()
+        return self.request(p.track(cmd_id, on), cmd_id, (p.Trk,), "TRACK")
+
+    def set_target(self, az_deg: float, el_deg: float) -> None:
+        """Say where to point. Fire and forget.
+
+        No reply is waited for, because an accepted target is answered with
+        nothing - the TRK stream already reports the target in force. Same
+        pattern as `stop` and `estop`.
+
+        A refusal therefore raises nothing here: it arrives as an ERR whose
+        id nobody is waiting for. It is not lost - every record reaches
+        `on_record`, so it shows up in a log - but it will not interrupt the
+        caller. The signal to watch is the TRK stream: the only thing that
+        refuses a target is tracking not being armed, and TRK says whether it
+        is on every line.
+        """
+        self._send(p.target(self.ids.next(), az_deg, el_deg))
+
+    def gear(self) -> p.Gear:
+        """Which gearing the Pico is counting. Changes nothing."""
+        cmd_id = self.ids.next()
+        return self.request(p.gear(cmd_id), cmd_id, (p.Gear,), "GEAR")
+
+    def set_gear(self, on: bool) -> p.Gear:
+        """Switch the final gear pair in or out of the maths.
+
+        Returns what the Pico is counting afterwards, so the caller can
+        confirm rather than assume.
+
+        Asking for the mode already in force changes nothing. A real switch
+        costs both axes their zero, so re-zero before moving - the Pico will
+        refuse a move until you do.
+        """
+        cmd_id = self.ids.next()
+        return self.request(p.gear(cmd_id, on), cmd_id, (p.Gear,), "GEAR")
+
     # --- moving -------------------------------------------------------------
 
     def begin_move(
-        self, axis: str, speed_dps: float, delta_deg: float
+        self, axis: str, speed_dps: float, delta_deg: float,
+        absolute: bool = False,
     ) -> p.Plan:
-        """Start a move and return its plan. Does not wait for it to finish."""
+        """Start a move and return its plan. Does not wait for it to finish.
+
+        `absolute` reads the angle as where to end up rather than how far to
+        turn, which is MOVETO rather than MOVE.
+        """
         cmd_id = self.ids.next()
-        line = p.move(cmd_id, axis, speed_dps, delta_deg)
-        self.request(line, cmd_id, (p.Ack,), "MOVE")
+        line = (p.move_to(cmd_id, axis, speed_dps, delta_deg) if absolute
+                else p.move(cmd_id, axis, speed_dps, delta_deg))
+        self.request(line, cmd_id, (p.Ack,), "MOVETO" if absolute else "MOVE")
         return self._await(
             cmd_id,
             (p.Plan,),
             self.clock() + self.timeout_s,
-            "the plan for MOVE",
+            "the plan for MOVETO" if absolute else "the plan for MOVE",
         )
 
     def begin_move_both(
@@ -347,23 +434,29 @@ class Session:
         az_delta_deg: float,
         el_speed_dps: float,
         el_delta_deg: float,
+        absolute: bool = False,
     ) -> tuple[p.Plan, p.Plan]:
         """Start both axes in one command. Returns their plans, azimuth first.
 
         Each axis runs at its own speed. Either half being refused refuses
-        the whole command, and nothing moves.
+        the whole command, and nothing moves. `absolute` picks MOVETO over
+        MOVE, as in `begin_move`.
         """
         cmd_id = self.ids.next()
-        line = p.move_both(
+        builder = p.move_to_both if absolute else p.move_both
+        line = builder(
             cmd_id, az_speed_dps, az_delta_deg, el_speed_dps, el_delta_deg
         )
-        self.request(line, cmd_id, (p.Ack,), "MOVE")
+        self.request(line, cmd_id, (p.Ack,),
+                     "MOVETO" if absolute else "MOVE")
         deadline = self.clock() + self.timeout_s
+        verb = "MOVETO" if absolute else "MOVE"
         az = self._await(
-            cmd_id, (p.Plan,), deadline, "the azimuth plan for MOVE", "AZ"
+            cmd_id, (p.Plan,), deadline, f"the azimuth plan for {verb}", "AZ"
         )
         el = self._await(
-            cmd_id, (p.Plan,), deadline, "the elevation plan for MOVE", "EL"
+            cmd_id, (p.Plan,), deadline, f"the elevation plan for {verb}",
+            "EL"
         )
         return az, el
 
@@ -390,7 +483,8 @@ class Session:
 
         No reply is waited for. While an axis is turning the Pico answers a
         stop with the move's own DONE and nothing else, because it prints
-        nothing between two pulses - so wait for that with await_done.
+        nothing between two pulses - so wait for that with await_done. While
+        tracking, a stop disarms it, and the TRK stream stops.
         """
         self._send(p.stop(self.ids.next()))
 

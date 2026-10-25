@@ -7,6 +7,8 @@
 // The commands, one per line:
 //
 //   MOVE,<id>,<AZ|EL>,<speed_mdps>,<delta_mdeg>   turn an axis
+//   MOVETO,<id>,<AZ|EL>,<speed_mdps>,<mdeg>       turn TO an angle
+//   MOVETO,<id>,AZ,<speed>,<mdeg>,EL,<speed>,<mdeg>
 //   MOVE,<id>,AZ,<speed>,<delta>,EL,<speed>,<delta>
 //                                                 turn both at once, each
 //                                                 at its own speed (either
@@ -22,6 +24,12 @@
 //   SAVE,<id>                                     keep the settings in flash
 //   DEFAULTS,<id>                                 back to the built-in ones
 //   SETTINGS,<id>                                 report the settings
+//   GEAR,<id>[,<ON|OFF>]                          report or change gear mode
+//   TRACK,<id>[,<ON|OFF>]                         report or arm tracking
+//   TARGET,<id>,<az_mdeg>,<el_mdeg>               point here (absolute)
+//
+// GEAR with no mode asks which one is in force. With ON or OFF it switches,
+// which changes what a degree means on both axes - see motor_config.hpp.
 //
 // A SET value is millidegrees per second per second for ACCEL, and
 // millidegrees for the MIN and MAX travel limits.
@@ -30,6 +38,10 @@
 // move takes up to a minute and its replies arrive long after the command,
 // so the id is how the laptop tells which reply belongs to which command, and
 // which move each row of the results came from.
+//
+// MOVE's angle is a change from where the axis is now; MOVETO's is where to
+// end up, measured from the zero. Everything else about them is the same,
+// including both being able to name each axis once with its own speed.
 //
 // Angles and speeds arrive as whole millidegrees, never as decimals. The
 // laptop turns "45.5" into 45500 before sending, which keeps this parser to
@@ -42,6 +54,7 @@
 enum class Verb {
     None,
     Move,
+    MoveTo,
     Stop,
     Estop,
     Zero,
@@ -53,6 +66,9 @@ enum class Verb {
     Save,
     Defaults,
     Settings,
+    Gear,
+    Track,
+    Target,
 };
 
 enum class AxisId {
@@ -65,9 +81,10 @@ enum class AxisId {
 // What SET can change. See settings.hpp for the rules on each.
 enum class Setting {
     None,
-    Accel,  // acceleration, millidegrees per second per second
-    Min,    // lower travel limit, millidegrees
-    Max,    // upper travel limit, millidegrees
+    Accel,     // acceleration, millidegrees per second per second
+    Min,       // lower travel limit, millidegrees
+    Max,       // upper travel limit, millidegrees
+    Deadband,  // how close to a target counts as there, millidegrees
 };
 
 // Why a line could not be understood. These are faults in the text itself.
@@ -103,6 +120,19 @@ struct Command {
 
     uint8_t gpio    = 0;             // PIN
     uint8_t level   = 0;             // PIN
+
+    // GEAR and TRACK: was a mode given, and which. Without one the command
+    // is a question rather than a change.
+    bool has_gear   = false;
+    bool gear_on    = false;
+    bool has_track  = false;
+    bool track_on   = false;
+
+    // TARGET: where to point, absolute, both axes. Always both - tracking
+    // has no use for one axis on its own, and a pair of numbers is simpler
+    // than optional halves on a command that arrives several times a second.
+    int32_t az_mdeg = 0;
+    int32_t el_mdeg = 0;
 };
 
 // Read one line. On failure the returned command has err set and verb left as

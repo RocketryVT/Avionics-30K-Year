@@ -114,8 +114,11 @@ def sweep(
     lim = console.session.limits()
     low, high = _axis_limits(lim, axis)
 
+    # The ceiling is the axis's own: in geared mode each is scaled by its
+    # own gear pair, so azimuth tops out lower than elevation.
+    speed_max = lim.speed_max_for(axis)
     usable = [s for s in speeds
-              if lim.speed_min_mdps <= p.deg_to_mdeg(s) <= lim.speed_max_mdps]
+              if lim.speed_min_mdps <= p.deg_to_mdeg(s) <= speed_max]
     skipped = [s for s in speeds if s not in usable]
     if skipped:
         console.say(

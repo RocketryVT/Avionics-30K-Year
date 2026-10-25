@@ -7,11 +7,35 @@ namespace {
 constexpr uint32_t MAGIC = 0x534D5347u;
 
 // Bumped if the layout below ever changes. A record of another version is
-// not read at all: its bytes would mean different things.
-constexpr uint32_t VERSION = 1;
+// not read at all: its bytes would mean different things. Version 2 added
+// the gear mode, which shifted everything after it along by four bytes;
+// version 3 added the deadband, which made each axis's block four numbers
+// instead of three.
+constexpr uint32_t VERSION = 3;
+
+// The gear mode on the wire to flash. Written out by hand rather than cast
+// from the enum, so reordering GearMode cannot silently change what a saved
+// record means.
+constexpr uint32_t GEAR_DIRECT = 0;
+constexpr uint32_t GEAR_GEARED = 1;
+
+// Where each part of the record starts. Worked out from SETTING_COUNT so
+// that adding another setting cannot leave two of these disagreeing.
+constexpr size_t BOTH_AXES    = 2 * SETTING_COUNT * 4;
+constexpr size_t OFF_MAGIC    = 0;
+constexpr size_t OFF_VERSION  = 4;
+constexpr size_t OFF_GEAR     = 8;
+constexpr size_t OFF_BUILT_IN = 12;
+constexpr size_t OFF_SETTINGS = OFF_BUILT_IN + BOTH_AXES;
+constexpr size_t OFF_CRC      = OFF_SETTINGS + BOTH_AXES;
 
 constexpr Setting EVERY_SETTING[] = {Setting::Accel, Setting::Min,
-                                     Setting::Max};
+                                     Setting::Max, Setting::Deadband};
+static_assert(sizeof(EVERY_SETTING) / sizeof(EVERY_SETTING[0]) ==
+                  SETTING_COUNT,
+              "EVERY_SETTING and SETTING_COUNT disagree");
+static_assert(OFF_CRC + 4 == SETTINGS_RECORD_LEN,
+              "the record layout does not add up");
 
 // Little-endian by hand rather than copying a struct, so the layout does not
 // depend on what padding the compiler chooses.
@@ -30,12 +54,14 @@ uint32_t get_u32(const uint8_t *p)
            (static_cast<uint32_t>(p[3]) << 24);
 }
 
-// The settable numbers of both axes, in the order the record stores them.
-void flatten(const AxisSpec &az, const AxisSpec &el, int32_t out[6])
+// The settable numbers of both axes, in the order the record stores them:
+// all of azimuth's, then all of elevation's.
+void flatten(const AxisSpec &az, const AxisSpec &el,
+             int32_t out[2 * SETTING_COUNT])
 {
-    for (size_t i = 0; i < 3; i++) {
-        out[i]     = setting_value(EVERY_SETTING[i], az);
-        out[i + 3] = setting_value(EVERY_SETTING[i], el);
+    for (size_t i = 0; i < SETTING_COUNT; i++) {
+        out[i]                 = setting_value(EVERY_SETTING[i], az);
+        out[i + SETTING_COUNT] = setting_value(EVERY_SETTING[i], el);
     }
 }
 
@@ -66,6 +92,22 @@ bool fits(const AxisSpec &built_in, const AxisSpec &spec)
     return true;
 }
 
+// The stored gear word as a mode. False if it is neither of the two we
+// write, which means the record is not one of ours however well its CRC
+// came out.
+bool read_gear(uint32_t stored, GearMode *out)
+{
+    if (stored == GEAR_DIRECT) {
+        *out = GearMode::Direct;
+        return true;
+    }
+    if (stored == GEAR_GEARED) {
+        *out = GearMode::Geared;
+        return true;
+    }
+    return false;
+}
+
 }  // namespace
 
 SettingRange allowed_range(Setting setting, const AxisSpec &built_in,
@@ -73,11 +115,16 @@ SettingRange allowed_range(Setting setting, const AxisSpec &built_in,
 {
     switch (setting) {
     case Setting::Accel:
-        return {ACCEL_MIN_MDPS2, ACCEL_MAX_MDPS2};
+        return {built_in.accel_min_mdps2, built_in.accel_max_mdps2};
     case Setting::Min:
         return {built_in.min_mdeg, current.max_mdeg};
     case Setting::Max:
         return {current.min_mdeg, built_in.max_mdeg};
+    case Setting::Deadband:
+        // Zero is allowed and means "chase every last step". Useless on a
+        // real fix, which is never that quiet, but it is a legitimate thing
+        // to ask for at a bench.
+        return {0, built_in.deadband_max_mdeg};
     case Setting::None:
         break;
     }
@@ -89,8 +136,9 @@ int32_t setting_value(Setting setting, const AxisSpec &spec)
     switch (setting) {
     case Setting::Accel: return spec.accel_mdps2;
     case Setting::Min:   return spec.min_mdeg;
-    case Setting::Max:   return spec.max_mdeg;
-    case Setting::None:  break;
+    case Setting::Max:      return spec.max_mdeg;
+    case Setting::Deadband: return spec.deadband_mdeg;
+    case Setting::None:     break;
     }
     return 0;
 }
@@ -100,8 +148,9 @@ void put_setting(Setting setting, int32_t value, AxisSpec *spec)
     switch (setting) {
     case Setting::Accel: spec->accel_mdps2 = value; break;
     case Setting::Min:   spec->min_mdeg = value; break;
-    case Setting::Max:   spec->max_mdeg = value; break;
-    case Setting::None:  break;
+    case Setting::Max:      spec->max_mdeg = value; break;
+    case Setting::Deadband: spec->deadband_mdeg = value; break;
+    case Setting::None:     break;
     }
 }
 
@@ -115,33 +164,33 @@ bool same_settings(const AxisSpec &a, const AxisSpec &b)
     return true;
 }
 
-size_t encode_settings(const AxisSpec &az_built_in,
-                       const AxisSpec &el_built_in, const AxisSpec &az,
-                       const AxisSpec &el, uint8_t *out, size_t n)
+size_t encode_settings(GearMode gear, const AxisSpec &az, const AxisSpec &el,
+                       uint8_t *out, size_t n)
 {
     if (n < SETTINGS_RECORD_LEN) {
         return 0;
     }
 
-    int32_t built_in[6];
-    int32_t now[6];
-    flatten(az_built_in, el_built_in, built_in);
+    int32_t built_in[2 * SETTING_COUNT];
+    int32_t now[2 * SETTING_COUNT];
+    flatten(az_built_in(gear), el_built_in(gear), built_in);
     flatten(az, el, now);
 
-    put_u32(out, MAGIC);
-    put_u32(out + 4, VERSION);
-    for (size_t i = 0; i < 6; i++) {
-        put_u32(out + 8 + 4 * i, static_cast<uint32_t>(built_in[i]));
-        put_u32(out + 32 + 4 * i, static_cast<uint32_t>(now[i]));
+    put_u32(out + OFF_MAGIC, MAGIC);
+    put_u32(out + OFF_VERSION, VERSION);
+    put_u32(out + OFF_GEAR,
+            (gear == GearMode::Geared) ? GEAR_GEARED : GEAR_DIRECT);
+    for (size_t i = 0; i < 2 * SETTING_COUNT; i++) {
+        put_u32(out + OFF_BUILT_IN + 4 * i,
+                static_cast<uint32_t>(built_in[i]));
+        put_u32(out + OFF_SETTINGS + 4 * i, static_cast<uint32_t>(now[i]));
     }
-    put_u32(out + 56, crc32(out, 56));
+    put_u32(out + OFF_CRC, crc32(out, OFF_CRC));
     return SETTINGS_RECORD_LEN;
 }
 
-LoadResult decode_settings(const uint8_t *in, size_t n,
-                           const AxisSpec &az_built_in,
-                           const AxisSpec &el_built_in, AxisSpec *az,
-                           AxisSpec *el)
+LoadResult decode_settings(const uint8_t *in, size_t n, GearMode *gear,
+                           AxisSpec *az, AxisSpec *el)
 {
     if (n < SETTINGS_RECORD_LEN) {
         return LoadResult::Corrupt;
@@ -155,40 +204,56 @@ LoadResult decode_settings(const uint8_t *in, size_t n,
         return LoadResult::Blank;
     }
 
-    if (get_u32(in) != MAGIC || get_u32(in + 4) != VERSION ||
-        get_u32(in + 56) != crc32(in, 56)) {
+    if (get_u32(in + OFF_MAGIC) != MAGIC ||
+        get_u32(in + OFF_VERSION) != VERSION ||
+        get_u32(in + OFF_CRC) != crc32(in, OFF_CRC)) {
         return LoadResult::Corrupt;
     }
+
+    // The gear mode first: it decides which built-in numbers the rest of the
+    // record should be judged against.
+    GearMode saved_gear = GearMode::Direct;
+    if (!read_gear(get_u32(in + OFF_GEAR), &saved_gear)) {
+        return LoadResult::Corrupt;
+    }
+
+    const AxisSpec az_base = az_built_in(saved_gear);
+    const AxisSpec el_base = el_built_in(saved_gear);
 
     // Saved against the numbers motor_config.hpp had then. If those have
     // changed, the code has been edited and reflashed on purpose, and the
     // new numbers win.
-    int32_t built_in[6];
-    flatten(az_built_in, el_built_in, built_in);
-    for (size_t i = 0; i < 6; i++) {
-        if (static_cast<int32_t>(get_u32(in + 8 + 4 * i)) != built_in[i]) {
+    int32_t built_in[2 * SETTING_COUNT];
+    flatten(az_base, el_base, built_in);
+    for (size_t i = 0; i < 2 * SETTING_COUNT; i++) {
+        if (static_cast<int32_t>(get_u32(in + OFF_BUILT_IN + 4 * i)) !=
+            built_in[i]) {
             return LoadResult::Stale;
         }
     }
 
-    AxisSpec new_az = az_built_in;
-    AxisSpec new_el = el_built_in;
-    for (size_t i = 0; i < 3; i++) {
+    AxisSpec new_az = az_base;
+    AxisSpec new_el = el_base;
+    for (size_t i = 0; i < SETTING_COUNT; i++) {
+        const size_t az_at = OFF_SETTINGS + 4 * i;
+        const size_t el_at = az_at + SETTING_COUNT * 4;
         put_setting(EVERY_SETTING[i],
-                    static_cast<int32_t>(get_u32(in + 32 + 4 * i)), &new_az);
+                    static_cast<int32_t>(get_u32(in + az_at)), &new_az);
         put_setting(EVERY_SETTING[i],
-                    static_cast<int32_t>(get_u32(in + 44 + 4 * i)), &new_el);
+                    static_cast<int32_t>(get_u32(in + el_at)), &new_el);
     }
 
     // The bounds on acceleration are not part of the built-in snapshot, so
     // a build that tightened them could otherwise load a value it refuses.
-    if (!fits(az_built_in, new_az) || !fits(el_built_in, new_el)) {
+    if (!fits(az_base, new_az) || !fits(el_base, new_el)) {
         return LoadResult::Stale;
     }
 
-    for (Setting s : EVERY_SETTING) {
-        put_setting(s, setting_value(s, new_az), az);
-        put_setting(s, setting_value(s, new_el), el);
-    }
+    // Both axes are replaced whole rather than setting by setting: the mode
+    // decides steps per degree and the speed numbers too, and loading a
+    // geared record must bring those with it.
+    *gear = saved_gear;
+    *az   = new_az;
+    *el   = new_el;
     return LoadResult::Ok;
 }

@@ -33,11 +33,12 @@ int32_t mdeg_to_steps(const AxisSpec &axis, int32_t mdeg)
 {
     // steps = mdeg/1000 * steps_num/steps_den, rearranged to divide only once.
     //
-    // int64 because the top can get too big for int32. With only the 10:1
-    // gearbox a full turn is 360000 * 400 = 144 million, which fits, but with
-    // the full antenna gearing it is 360000 * 6400 = 2.3 billion - past the
-    // int32 ceiling of 2.15 billion, where it would silently come out
-    // negative. Keep the int64 so that switch cannot break this.
+    // int64 because the top can get too big for int32. In direct mode a full
+    // turn is 360000 * 400 = 144 million, which fits, but in geared mode
+    // azimuth is 360000 * 12800 = 4.6 billion - well past the int32 ceiling
+    // of 2.15 billion, where it would silently come out negative. The gear
+    // switch is flipped at the prompt, so this is reached at run time, not
+    // by editing the code.
     const int64_t top    = static_cast<int64_t>(mdeg) * axis.steps_num;
     const int64_t bottom = static_cast<int64_t>(axis.steps_den) * 1000;
     return static_cast<int32_t>(div_round(top, bottom));
@@ -104,10 +105,13 @@ static void plan_speed(const AxisSpec &axis, Move *m)
                                       : static_cast<uint32_t>(total);
 }
 
-PlanResult plan_move(const AxisSpec &axis, int32_t pos_steps,
-                     int32_t delta_mdeg, int32_t speed_mdps, Move *out)
+// The body shared by plan_move and plan_move_to. Both work out how many
+// steps to turn and then everything else is identical, so the checks and the
+// speed plan live here once.
+static PlanResult plan_from_steps(const AxisSpec &axis, int32_t pos_steps,
+                                  int32_t delta_steps, int32_t speed_mdps,
+                                  Move *out)
 {
-    const int32_t delta_steps  = mdeg_to_steps(axis, delta_mdeg);
     const int32_t target_steps = pos_steps + delta_steps;
 
     // Fill this in before any check can fail, so an error message can report
@@ -117,7 +121,10 @@ PlanResult plan_move(const AxisSpec &axis, int32_t pos_steps,
     out->to_mdeg    = steps_to_mdeg(axis, target_steps);
     out->speed_mdps = speed_mdps;
 
-    if (speed_mdps < SPEED_MIN_MDPS || speed_mdps > SPEED_MAX_MDPS) {
+    // The ceiling is the axis's own, not a global: geared mode scales it
+    // down with the gearing, so the motor is never commanded past the speed
+    // its torque curve was read at.
+    if (speed_mdps < SPEED_MIN_MDPS || speed_mdps > axis.speed_max_mdps) {
         return PlanResult::BadSpeed;
     }
 
@@ -132,9 +139,9 @@ PlanResult plan_move(const AxisSpec &axis, int32_t pos_steps,
     //
     // The limits are written in degrees, but the machine only moves in whole
     // steps, and converting the result back to degrees rounds a second time.
-    // Checking "360 degrees" that way can fail: with the full antenna
-    // gearing, 36571 steps reads back as 359.996 and one more as 360.006,
-    // which looks past a 360.000 limit even though it is the nearest step.
+    // For example, at geared azimuth's 101.587 steps per degree, 36571 steps
+    // reads back as 359.996 and one more as 360.006 - so a 360.000 limit
+    // checked in degrees would refuse the step nearest to it.
     // Converting the limit into steps once removes the second rounding and
     // lets a move land exactly on the boundary.
     const int32_t min_steps = mdeg_to_steps(axis, axis.min_mdeg);
@@ -146,6 +153,101 @@ PlanResult plan_move(const AxisSpec &axis, int32_t pos_steps,
 
     plan_speed(axis, out);
     return PlanResult::Ok;
+}
+
+PlanResult plan_move(const AxisSpec &axis, int32_t pos_steps,
+                     int32_t delta_mdeg, int32_t speed_mdps, Move *out)
+{
+    return plan_from_steps(axis, pos_steps, mdeg_to_steps(axis, delta_mdeg),
+                           speed_mdps, out);
+}
+
+PlanResult plan_move_to(const AxisSpec &axis, int32_t pos_steps,
+                        int32_t target_mdeg, int32_t speed_mdps, Move *out)
+{
+    // Subtracted in steps, not in millidegrees, so the angle is rounded
+    // exactly once. The axis ends up on the nearest whole step to the angle
+    // asked for, and PLAN reports which one that is.
+    const int32_t target_steps = mdeg_to_steps(axis, target_mdeg);
+    return plan_from_steps(axis, pos_steps, target_steps - pos_steps,
+                           speed_mdps, out);
+}
+
+// Clamp a to the range lo..hi.
+static float clamped(float a, float lo, float hi)
+{
+    if (a < lo) {
+        return lo;
+    }
+    return (a > hi) ? hi : a;
+}
+
+float chase_velocity(const AxisSpec &axis, int32_t error_steps, float v_sps,
+                     float dt_s)
+{
+    const float accel   = per_step(axis, axis.accel_mdps2);
+    const float v_max   = per_step(axis, axis.speed_max_mdps);
+    const float v_start = per_step(axis, axis.v_start_mdps);
+    const int32_t dead  = mdeg_to_steps(axis, axis.deadband_mdeg);
+
+    const float dt = clamped(dt_s, 0.0f, CHASE_MAX_DT_S);
+
+    // Worked on the magnitude with the sign put back at the end, so that an
+    // error of +N and one of -N are answered with the same speed in opposite
+    // directions rather than two subtly different ones.
+    const int32_t away = (error_steps < 0) ? -error_steps : error_steps;
+
+    float want = 0.0f;
+    if (away > dead) {
+        // How fast this axis could be going and still come to rest by the
+        // time it arrives. Measured to the MIDDLE of the deadband, not its
+        // near edge: braking from sqrt(2*a*d) covers exactly d, so aiming at
+        // the middle means arriving there already stopped. The deadband's job
+        // is only to stop it setting off again, not to leave room to brake
+        // in.
+        const float brakeable =
+            sqrtf(2.0f * accel * static_cast<float>(away));
+        want = (brakeable < v_max) ? brakeable : v_max;
+        if (error_steps < 0) {
+            want = -want;
+        }
+    }
+
+    // Leaving a standstill: go straight to the starting speed rather than
+    // creeping up from nothing. Only ever applied on the way out - never when
+    // the braking cap is what is holding the speed down - so it cannot stop
+    // the axis settling.
+    const float stopped = 0.5f;  // half a step per second is standing still
+    if (v_sps > -stopped && v_sps < stopped && want != 0.0f) {
+        const float kick = (want < 0.0f) ? -v_start : v_start;
+        // Unless the target is so close that the starting speed would carry
+        // it past: then the braking cap wins and it creeps in.
+        if ((want < 0.0f ? -want : want) >= v_start) {
+            return kick;
+        }
+        return want;
+    }
+
+    // Change speed by no more than the axis is allowed to.
+    const float most = accel * dt;
+    return clamped(want, v_sps - most, v_sps + most);
+}
+
+uint32_t interval_us_at(float v_sps)
+{
+    const float speed = (v_sps < 0.0f) ? -v_sps : v_sps;
+    if (speed < 0.001f) {
+        return MAX_INTERVAL_US;  // standing still: nothing is due
+    }
+
+    const float us = 1000000.0f / speed;
+    if (us <= static_cast<float>(MIN_INTERVAL_US)) {
+        return MIN_INTERVAL_US;
+    }
+    if (us >= static_cast<float>(MAX_INTERVAL_US)) {
+        return MAX_INTERVAL_US;
+    }
+    return static_cast<uint32_t>(us);
 }
 
 uint32_t interval_us(const Move &move, uint32_t i)

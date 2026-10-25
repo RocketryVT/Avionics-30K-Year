@@ -55,6 +55,8 @@ READING_WARN_DEG = 5.0
 HELP_TEXT = """\
   move <az|el> <deg/s> <degrees>   turn an axis, + or -
   move az <deg/s> <deg> el <deg/s> <deg>   both at once, each at its own speed
+  goto <az|el> <deg/s> <degrees>   turn TO an angle, not by one
+  goto az <deg/s> <deg> el <deg/s> <deg>   point both at once
   zero [az|el|all] [degrees]       say where it is now
   pos                              where it thinks it is
   stop                             slow to a stop
@@ -65,8 +67,11 @@ HELP_TEXT = """\
   settings                         acceleration and travel, and if saved
   set <az|el> accel <deg/s/s>      change the acceleration, for now
   set <az|el> <min|max> <degrees>  narrow the travel, for now
+  set <az|el> deadband <degrees>   how close to a target counts as there
   save                             keep the settings after a restart
   defaults                         back to the numbers in motor_config.hpp
+  gear [on|off]                    count the final gear pair, or not
+  track [on|off]                   arm or disarm chasing a target
   sweep [angle=45] [speeds=1,5,90] [pause]   one angle at each speed
   random [count=10] [speed=5] [seed=N] [pause]   angles within the limits
   true [row] <degrees>             what the protractor really reads
@@ -77,7 +82,13 @@ HELP_TEXT = """\
   quit                             leave
 
   Angles are relative: 'move az 5 -45' turns back 45 degrees.
-  Ctrl-C during a move stops the motor, then waits for its report."""
+  'goto' is absolute: 'goto az 5 45' points at 45, wherever it started.
+  Ctrl-C during a move stops the motor, then waits for its report.
+  'gear on' means the belt is fitted and angles are at the antenna;
+  'gear off' means each axis on its own, angles at the gearbox shaft.
+  To track, close this prompt and run 'py -m gs.track' (or use the window):
+  it arms tracking and sends the targets. 'track on' here only arms it, and
+  with nothing sending targets the Pico gives up after a second or so."""
 
 
 class UsageError(Exception):
@@ -91,6 +102,20 @@ def _axis(word: str, allow_all: bool = False) -> str:
         names = " or ".join(a.lower() for a in allowed)
         raise UsageError(f"axis must be {names}")
     return name
+
+
+def _on_off(args: list[str], usage: str) -> bool | None:
+    """The one optional on/off word `gear` and `track` take. None if absent."""
+    if not args:
+        return None
+    if len(args) != 1:
+        raise UsageError(usage)
+    word = args[0].strip().lower()
+    if word in ("on", "yes", "true", "1"):
+        return True
+    if word in ("off", "no", "false", "0"):
+        return False
+    raise UsageError(usage)
 
 
 def _looks_like_a_number(word: str) -> bool:
@@ -202,6 +227,17 @@ class Console:
                     f"el {p.format_mdeg(record.el_mdeg)}  "
                     f"up {record.uptime_s} s"
                 )
+        elif isinstance(record, p.Trk):
+            # The tracking stream. Hidden like the heartbeat unless asked
+            # for: at a few lines a second it would scroll everything else
+            # away, and `py -m gs.track` is where it is meant to be watched.
+            if self.verbose:
+                self.say(
+                    f"       tracking   az {p.format_mdeg(record.az_pos_mdeg)}"
+                    f" of {p.format_mdeg(record.az_target_mdeg)}"
+                    f"   el {p.format_mdeg(record.el_pos_mdeg)}"
+                    f" of {p.format_mdeg(record.el_target_mdeg)}"
+                )
         elif isinstance(record, p.Info) and record.text:
             mark = "  ??" if record.malformed else "    "
             self.say(f"{mark}   {record.text}")
@@ -222,14 +258,18 @@ class Console:
     def do_limits(self, args: list[str]) -> None:
         lim = self.session.limits()
         self.say(
-            f"  az {p.format_mdeg(lim.az_min_mdeg)}"
+            f"  travel  az {p.format_mdeg(lim.az_min_mdeg)}"
             f"..{p.format_mdeg(lim.az_max_mdeg)} deg"
             f"   el {p.format_mdeg(lim.el_min_mdeg)}"
             f"..{p.format_mdeg(lim.el_max_mdeg)} deg"
         )
+        # One ceiling per axis: geared mode scales each by its own gear
+        # pair, so they are not the same number.
         self.say(
-            f"  speed {p.format_mdeg(lim.speed_min_mdps)}"
-            f"..{p.format_mdeg(lim.speed_max_mdps)} deg/s"
+            f"  speed   az {p.format_mdeg(lim.speed_min_mdps)}"
+            f"..{p.format_mdeg(lim.az_speed_max_mdps)} deg/s"
+            f"   el {p.format_mdeg(lim.speed_min_mdps)}"
+            f"..{p.format_mdeg(lim.el_speed_max_mdps)} deg/s"
         )
 
     def do_pos(self, args: list[str]) -> None:
@@ -287,11 +327,16 @@ class Console:
         axis = _axis(args[0])
         name = args[1].strip().upper()
         if name not in p.SETTING_NAMES:
-            raise UsageError("setting must be accel, min or max")
+            allowed = ", ".join(n.lower() for n in p.SETTING_NAMES)
+            raise UsageError(f"setting must be {allowed}")
         value = _number(args[2], name.lower())
 
         self.session.set_setting(axis, name, value)
         unit = "deg/s/s" if name == "ACCEL" else "deg"
+        # DEADBAND only bites while tracking, which is worth saying so nobody
+        # wonders why a move ignored it.
+        if name == "DEADBAND":
+            unit = "deg (used when tracking)"
         self.say(
             f"  {axis.lower()} {name.lower()} set to "
             f"{p.format_mdeg(p.deg_to_mdeg(value))} {unit}"
@@ -307,15 +352,93 @@ class Console:
         self.say("  back to the built-in settings")
         self.show_settings()
 
+    def do_gear(self, args: list[str]) -> None:
+        """Report or change which gearing the Pico counts."""
+        wanted = _on_off(args, "gear [on|off]")
+        if wanted is None:
+            self.report_gear(self.session.gear())
+            return
+
+        # Asked first so we can say whether anything actually changed. The
+        # Pico treats setting the mode already in force as a no-op, zero
+        # included, and the operator should hear which happened.
+        before = self.session.gear()
+        after = self.session.set_gear(wanted)
+        self.report_gear(after)
+
+        if after.geared == before.geared:
+            self.say("  already set that way - nothing changed")
+            return
+        self.say(
+            "  both axes have lost their zero: the drive train just "
+            "changed, so where they are is no longer known."
+        )
+        self.say("  send zero before the next move.")
+        self.show_settings()
+
+    def do_track(self, args: list[str]) -> None:
+        """Arm or disarm chasing a target, or just report."""
+        wanted = _on_off(args, "track [on|off]")
+        if wanted is None:
+            self.report_track(self.session.track())
+            return
+
+        trk = self.session.track(wanted)
+        self.report_track(trk)
+        if trk.armed:
+            # Worth saying, because arming on its own looks like nothing
+            # happened - and then the watchdog quietly undoes it.
+            self.say(
+                "  armed. Nothing will move until targets arrive, and the "
+                "Pico gives up if they stop."
+            )
+            self.say(
+                "  to send them, close this prompt and run: "
+                "py -m gs.track --sim"
+            )
+
+    def report_track(self, trk: p.Trk) -> None:
+        self.say(f"  tracking {'ARMED' if trk.armed else 'off'}")
+        self.say(
+            f"         az target {p.format_mdeg(trk.az_target_mdeg)}"
+            f"  at {p.format_mdeg(trk.az_pos_mdeg)}"
+            f"  off by {p.format_mdeg(trk.az_error_mdeg)} deg"
+        )
+        self.say(
+            f"         el target {p.format_mdeg(trk.el_target_mdeg)}"
+            f"  at {p.format_mdeg(trk.el_pos_mdeg)}"
+            f"  off by {p.format_mdeg(trk.el_error_mdeg)} deg"
+        )
+
+    def report_gear(self, gear: p.Gear) -> None:
+        # Every results row is marked with the mode it was taken in, so
+        # keep that current whenever we learn what the mode is - on a bare
+        # query as well as after a switch.
+        if self.results is not None:
+            self.results.gear = "on" if gear.geared else "off"
+        self.say(f"  gear {'on' if gear.geared else 'off'}: {gear.describe()}")
+        self.say(
+            f"         az {gear.az_steps_per_deg:.3f} steps/deg"
+            f"   el {gear.el_steps_per_deg:.3f} steps/deg"
+        )
+
     def show_settings(self) -> None:
         cfg = self.session.settings()
-        for name, accel, low, high in (
-            ("az", cfg.az_accel_mdps2, cfg.az_min_mdeg, cfg.az_max_mdeg),
-            ("el", cfg.el_accel_mdps2, cfg.el_min_mdeg, cfg.el_max_mdeg),
+        # First, because it decides what every number under it means.
+        self.say(
+            f"  gear {'on' if cfg.geared else 'off'} - angles at the "
+            f"{'antenna' if cfg.geared else 'gearbox output shaft'}"
+        )
+        for name, accel, low, high, dead in (
+            ("az", cfg.az_accel_mdps2, cfg.az_min_mdeg, cfg.az_max_mdeg,
+             cfg.az_deadband_mdeg),
+            ("el", cfg.el_accel_mdps2, cfg.el_min_mdeg, cfg.el_max_mdeg,
+             cfg.el_deadband_mdeg),
         ):
             self.say(
                 f"  {name}  accel {p.format_mdeg(accel)} deg/s/s"
                 f"   travel {p.format_mdeg(low)}..{p.format_mdeg(high)} deg"
+                f"   deadband {p.format_mdeg(dead)} deg"
             )
         if not cfg.saved:
             self.say(
@@ -323,24 +446,38 @@ class Console:
                 "Type save to keep them."
             )
         elif cfg.built_in:
-            self.say("  the built-in numbers from motor_config.hpp")
+            # The gear mode is saved with the rest, so say that a restart
+            # comes back here - it is the thing most worth confirming
+            # straight after switching.
+            self.say(
+                "  the built-in numbers from motor_config.hpp for this "
+                "gear mode - a restart comes back here"
+            )
         else:
             self.say("  saved - a restart comes back with these")
 
     # --- moving -------------------------------------------------------------
 
     def do_move(self, args: list[str]) -> None:
+        self._move_command(args, absolute=False)
+
+    def do_goto(self, args: list[str]) -> None:
+        """The same as move, with the angle read as where to end up."""
+        self._move_command(args, absolute=True)
+
+    def _move_command(self, args: list[str], absolute: bool) -> None:
+        word = "goto" if absolute else "move"
         if len(args) == 3:
             axis = _axis(args[0])
             speed = _number(args[1], "speed")
             angle = _number(args[2], "angle")
-            self.run_move(axis, speed, angle)
+            self.run_move(axis, speed, angle, absolute=absolute)
             return
 
         if len(args) != 6:
             raise UsageError(
-                "move <az|el> <deg/s> <degrees>, or both at once: "
-                "move az <deg/s> <degrees> el <deg/s> <degrees>"
+                f"{word} <az|el> <deg/s> <degrees>, or both at once: "
+                f"{word} az <deg/s> <degrees> el <deg/s> <degrees>"
             )
 
         # Both axes. Either may be typed first, but each only once.
@@ -349,14 +486,14 @@ class Console:
             axis = _axis(axis_word)
             if axis in halves:
                 raise UsageError(
-                    "name each axis once: "
-                    "move az <deg/s> <degrees> el <deg/s> <degrees>"
+                    f"name each axis once: "
+                    f"{word} az <deg/s> <degrees> el <deg/s> <degrees>"
                 )
             halves[axis] = (
                 _number(speed_word, "speed"),
                 _number(angle_word, "angle"),
             )
-        self.run_move_both(*halves["AZ"], *halves["EL"])
+        self.run_move_both(*halves["AZ"], *halves["EL"], absolute=absolute)
 
     def run_move(
         self,
@@ -364,6 +501,7 @@ class Console:
         speed_dps: float,
         delta_deg: float,
         row_hint: bool = True,
+        absolute: bool = False,
     ):
         """One move, start to finish, with the waiting handled.
 
@@ -372,7 +510,8 @@ class Console:
         here and is not worth raising again further up.
         """
         try:
-            plan = self.session.begin_move(axis, speed_dps, delta_deg)
+            plan = self.session.begin_move(axis, speed_dps, delta_deg,
+                                           absolute=absolute)
         except sn.Refused as refused:
             self.say(f"  refused: {refused}")
             return None
@@ -387,7 +526,12 @@ class Console:
         self.report_move(outcome)
 
         if self.results is not None:
-            row = self.results.add(outcome, commanded_deg=delta_deg)
+            # commanded_deg is how far it was asked to turn, so an absolute
+            # move records the journey rather than the destination - the
+            # column means the same thing in every row.
+            commanded = (delta_deg if not absolute
+                         else p.mdeg_to_deg(plan.to_mdeg - plan.from_mdeg))
+            row = self.results.add(outcome, commanded_deg=commanded)
             # Left out when a scripted run is about to ask for the reading
             # itself, which would otherwise print two prompts for the same
             # number.
@@ -402,6 +546,7 @@ class Console:
         az_delta_deg: float,
         el_speed_dps: float,
         el_delta_deg: float,
+        absolute: bool = False,
     ):
         """Both axes in one command, each at its own speed.
 
@@ -411,7 +556,8 @@ class Console:
         """
         try:
             plans = self.session.begin_move_both(
-                az_speed_dps, az_delta_deg, el_speed_dps, el_delta_deg
+                az_speed_dps, az_delta_deg, el_speed_dps, el_delta_deg,
+                absolute=absolute,
             )
         except sn.Refused as refused:
             self.say(f"  refused: {refused}")
@@ -431,7 +577,11 @@ class Console:
             self.report_move(outcome, label=True)
 
         if self.results is not None:
-            commanded = (az_delta_deg, el_delta_deg)
+            commanded = (
+                (az_delta_deg, el_delta_deg) if not absolute
+                else tuple(p.mdeg_to_deg(plan.to_mdeg - plan.from_mdeg)
+                           for plan in plans)
+            )
             rows = [
                 self.results.add(outcome, commanded_deg=deg, note="both axes")
                 for outcome, deg in zip(outcomes, commanded)
@@ -670,6 +820,7 @@ class Console:
 
     COMMANDS = {
         "move": do_move,
+        "goto": do_goto,
         "zero": do_zero,
         "pos": do_pos,
         "stop": do_stop,
@@ -681,6 +832,8 @@ class Console:
         "set": do_set,
         "save": do_save,
         "defaults": do_defaults,
+        "gear": do_gear,
+        "track": do_track,
         "sweep": do_sweep,
         "random": do_random,
         "true": do_true,
@@ -815,9 +968,22 @@ def main(argv: list[str] | None = None) -> int:
         except sn.SessionError as exc:
             print(f"warning: no answer to PING ({exc})")
 
+        # Which gearing it is counting, every time. It decides what every
+        # angle typed and reported means, and a Pico that was already
+        # running has no banner left on screen to say.
+        gear_word = ""
+        try:
+            gear = session.gear()
+            gear_word = "on" if gear.geared else "off"
+            print(f"gear {gear_word}: {gear.describe()}")
+        except sn.SessionError as exc:
+            print(f"warning: could not read the gear mode ({exc})")
+
         if args.log is not None:
             path = args.log or results_file.default_path()
-            console.results = results_file.ResultsFile(path=path, pico=who)
+            console.results = results_file.ResultsFile(
+                path=path, pico=who, gear=gear_word
+            )
             console.results.write()  # so the file exists from the start
             print(f"logging to {path}")
 

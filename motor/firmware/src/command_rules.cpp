@@ -33,10 +33,12 @@ const AxisSpec &spec_for(AxisId axis, const MachineState &s)
     return (axis == AxisId::El) ? s.el_spec : s.az_spec;
 }
 
-// What motor_config.hpp says, which settings are bounded by.
-const AxisSpec &built_in_for(AxisId axis)
+// What motor_config.hpp says for this axis in this gear mode, which
+// settings are bounded by. Both the travel limits and the acceleration
+// bounds differ between the modes, so the mode has to come in here.
+AxisSpec built_in_for(AxisId axis, GearMode gear)
 {
-    return (axis == AxisId::El) ? EL_SPEC : AZ_SPEC;
+    return (axis == AxisId::El) ? el_built_in(gear) : az_built_in(gear);
 }
 
 bool axis_zeroed(AxisId axis, const MachineState &s)
@@ -75,8 +77,12 @@ Half half_for(const Command &c, AxisId axis)
 // Check one axis's share and plan it, exactly as a one-axis MOVE is checked.
 // Fills in *m and returns true if it may go; otherwise writes the refusal
 // into d and returns false.
+//
+// `absolute` picks whether h.mdeg is where to end up or how far to turn.
+// Everything after that is identical, which is why MOVE and MOVETO share
+// this.
 bool check_half(const Command &c, AxisId axis, const Half &h,
-                const MachineState &s, Move *m, Decision &d)
+                const MachineState &s, bool absolute, Move *m, Decision &d)
 {
     // Without a zero the soft limits are measured from an unknown origin,
     // which is no protection at all. This is the main thing standing between
@@ -88,7 +94,10 @@ bool check_half(const Command &c, AxisId axis, const Half &h,
     }
 
     const AxisSpec &spec = spec_for(axis, s);
-    switch (plan_move(spec, axis_pos(axis, s), h.mdeg, h.mdps, m)) {
+    const PlanResult planned =
+        absolute ? plan_move_to(spec, axis_pos(axis, s), h.mdeg, h.mdps, m)
+                 : plan_move(spec, axis_pos(axis, s), h.mdeg, h.mdps, m);
+    switch (planned) {
     case PlanResult::BadSpeed:
         say(d, format_err(line_buf(d), MAX_REPLY_LEN, c.id, ErrCode::BadSpeed,
                           axis_name(axis)));
@@ -112,7 +121,7 @@ bool check_half(const Command &c, AxisId axis, const Half &h,
     return true;
 }
 
-Decision do_move(const Command &c, const MachineState &s)
+Decision do_move(const Command &c, const MachineState &s, bool absolute)
 {
     if (c.axis != AxisId::Az && c.axis != AxisId::El) {
         return refuse(c, ErrCode::BadAxis, "");
@@ -129,10 +138,12 @@ Decision do_move(const Command &c, const MachineState &s)
     Decision d;
     Move az_move{};
     Move el_move{};
-    if (az.wanted && !check_half(c, AxisId::Az, az, s, &az_move, d)) {
+    if (az.wanted &&
+        !check_half(c, AxisId::Az, az, s, absolute, &az_move, d)) {
         return d;
     }
-    if (el.wanted && !check_half(c, AxisId::El, el, s, &el_move, d)) {
+    if (el.wanted &&
+        !check_half(c, AxisId::El, el, s, absolute, &el_move, d)) {
         return d;
     }
 
@@ -143,7 +154,9 @@ Decision do_move(const Command &c, const MachineState &s)
     d.az_move = az_move;
     d.el_move = el_move;
 
-    say(d, format_ack(line_buf(d), MAX_REPLY_LEN, c.id, Verb::Move));
+    // The verb is echoed as it was sent, so the laptop can tell which of the
+    // two it is reading the answer to.
+    say(d, format_ack(line_buf(d), MAX_REPLY_LEN, c.id, c.verb));
 
     // PLAN carries the end angle after rounding to whole steps, which is not
     // simply start plus commanded: 10 degrees is 444 steps, or 9.990 degrees.
@@ -159,9 +172,10 @@ Decision do_move(const Command &c, const MachineState &s)
     return d;
 }
 
-// While an axis is turning, only the two stop commands are acted on. They are
-// answered by the DONE that follows rather than by an ACK, so that nothing is
-// printed between the first pulse and the last.
+// While an axis is busy, only the two stop commands are acted on. They get
+// no ACK, so that nothing is printed between the first pulse and the last.
+// A planned move answers with its DONE; tracking just stops, and the TRK
+// stream stops with it.
 Decision do_while_moving(const Command &c)
 {
     Decision d;
@@ -276,7 +290,7 @@ Decision do_set(const Command &c, const MachineState &s)
     // the current MAX, and MAX may not pass the current MIN.
     AxisSpec spec = spec_for(c.axis, s);
     const SettingRange r =
-        allowed_range(c.setting, built_in_for(c.axis), spec);
+        allowed_range(c.setting, built_in_for(c.axis, s.gear), spec);
     if (c.value < r.lo || c.value > r.hi) {
         // Refused whole, never clamped: the operator would otherwise be
         // running with a number they did not type.
@@ -289,6 +303,7 @@ Decision do_set(const Command &c, const MachineState &s)
 
     Decision d;
     d.act     = Act::SetSettings;
+    d.gear    = s.gear;
     d.az_spec = (c.axis == AxisId::Az) ? spec : s.az_spec;
     d.el_spec = (c.axis == AxisId::El) ? spec : s.el_spec;
     say(d, format_ack(line_buf(d), MAX_REPLY_LEN, c.id, Verb::Set));
@@ -305,26 +320,145 @@ Decision do_save(const Command &c)
     return d;
 }
 
-Decision do_defaults(const Command &c)
+Decision do_defaults(const Command &c, const MachineState &s)
 {
-    // Back to motor_config.hpp. Like SET, this lasts until a restart unless
-    // it is saved.
+    // Back to motor_config.hpp, for the mode in force. Like SET, this lasts
+    // until a restart unless it is saved.
+    //
+    // The gear mode is deliberately left alone. It says which gearing is
+    // bolted to the machine, which is not something `defaults` can know.
     Decision d;
     d.act     = Act::SetSettings;
-    d.az_spec = AZ_SPEC;
-    d.el_spec = EL_SPEC;
+    d.gear    = s.gear;
+    d.az_spec = az_built_in(s.gear);
+    d.el_spec = el_built_in(s.gear);
     say(d, format_ack(line_buf(d), MAX_REPLY_LEN, c.id, Verb::Defaults));
     return d;
 }
 
 Decision do_settings(const Command &c, const MachineState &s)
 {
-    const bool built_in =
-        same_settings(s.az_spec, AZ_SPEC) && same_settings(s.el_spec, EL_SPEC);
+    const bool built_in = same_settings(s.az_spec, az_built_in(s.gear)) &&
+                          same_settings(s.el_spec, el_built_in(s.gear));
 
     Decision d;
-    say(d, format_cfg(line_buf(d), MAX_REPLY_LEN, c.id, s.az_spec, s.el_spec,
-                      !s.settings_unsaved, built_in));
+    say(d, format_cfg(line_buf(d), MAX_REPLY_LEN, c.id, s.gear, s.az_spec,
+                      s.el_spec, !s.settings_unsaved, built_in));
+    return d;
+}
+
+// ---------------------------------------------------------------------------
+// GEAR
+// ---------------------------------------------------------------------------
+
+Decision do_gear(const Command &c, const MachineState &s)
+{
+    const GearMode wanted =
+        c.has_gear ? (c.gear_on ? GearMode::Geared : GearMode::Direct) : s.gear;
+
+    Decision d;
+
+    // Asking which mode, or asking for the one already in force, changes
+    // nothing. The second case matters: `gear on` twice must not cost the
+    // zero the first one was followed by.
+    if (wanted != s.gear) {
+        d.act     = Act::SetGear;
+        d.gear    = wanted;
+        d.az_spec = az_built_in(wanted);
+        d.el_spec = el_built_in(wanted);
+
+        // The belt has just gone on or come off, so the step count no longer
+        // describes a known angle and the travel limits have changed what
+        // they mean. Giving up both zeros is the honest response, the same
+        // as after an emergency stop.
+        d.clear_az_zero = true;
+        d.clear_el_zero = true;
+    }
+
+    say(d, format_gear(line_buf(d), MAX_REPLY_LEN, c.id, wanted,
+                       (wanted == s.gear) ? s.az_spec : d.az_spec,
+                       (wanted == s.gear) ? s.el_spec : d.el_spec));
+    return d;
+}
+
+// ---------------------------------------------------------------------------
+// TRACK and TARGET
+// ---------------------------------------------------------------------------
+
+TrackReport report_of(const MachineState &s)
+{
+    TrackReport r{};
+    r.armed          = s.tracking;
+    r.az_target_mdeg = steps_to_mdeg(s.az_spec, s.az_target_steps);
+    r.az_pos_mdeg    = steps_to_mdeg(s.az_spec, s.az_pos_steps);
+    r.az_mdps        = s.az_mdps;
+    r.el_target_mdeg = steps_to_mdeg(s.el_spec, s.el_target_steps);
+    r.el_pos_mdeg    = steps_to_mdeg(s.el_spec, s.el_pos_steps);
+    r.el_mdps        = s.el_mdps;
+    return r;
+}
+
+Decision do_track(const Command &c, const MachineState &s)
+{
+    const bool wanted = c.has_track ? c.track_on : s.tracking;
+
+    // Arming needs both axes zeroed, for the same reason a move does: the
+    // soft limits are measured from the zero, and without one they are no
+    // protection at all. Disarming is never refused - it is the way out.
+    if (wanted && !s.tracking && !(s.az_zeroed && s.el_zeroed)) {
+        return refuse(c, ErrCode::NoZero, "");
+    }
+
+    Decision d;
+    if (wanted != s.tracking) {
+        d.act      = Act::SetTrack;
+        d.track_on = wanted;
+    }
+
+    MachineState after = s;
+    after.tracking = wanted;
+    if (wanted && !s.tracking) {
+        // Arming starts the target where the axes are, so it never moves
+        // anything on its own.
+        after.az_target_steps = s.az_pos_steps;
+        after.el_target_steps = s.el_pos_steps;
+    }
+    say(d, format_trk(line_buf(d), MAX_REPLY_LEN, c.id, report_of(after)));
+    return d;
+}
+
+// Hold a target inside the axis's travel rather than refusing it.
+//
+// This is the one place the safety model works differently from a move. A
+// move is checked whole and refused whole, because it is a finite thing
+// somebody typed. A target arrives several times a second from a rocket that
+// does not know where the gimbal can point, and refusing one would just
+// leave the antenna chasing the last reachable one with no way to recover
+// when the rocket comes back into range. Clamping keeps it pointing as close
+// as it can and picks the truth up again by itself.
+int32_t clamp_target(const AxisSpec &spec, int32_t mdeg)
+{
+    if (mdeg < spec.min_mdeg) {
+        return spec.min_mdeg;
+    }
+    return (mdeg > spec.max_mdeg) ? spec.max_mdeg : mdeg;
+}
+
+Decision do_target(const Command &c, const MachineState &s)
+{
+    if (!s.tracking) {
+        return refuse(c, ErrCode::NotTracking, "");
+    }
+
+    Decision d;
+    d.act      = Act::SetTarget;
+    d.az_steps = mdeg_to_steps(s.az_spec, clamp_target(s.az_spec, c.az_mdeg));
+    d.el_steps = mdeg_to_steps(s.el_spec, clamp_target(s.el_spec, c.el_mdeg));
+
+    // Answered with nothing. It arrives several times a second, and the TRK
+    // stream already reports which target is in force; an ACK apiece would
+    // double the traffic and tell the laptop nothing it is not already
+    // being told.
     return d;
 }
 
@@ -350,11 +484,18 @@ Decision decide(const Command &c, const MachineState &s)
         return refuse(c, err_for(c.err), "");
     }
     if (s.busy) {
-        return do_while_moving(c);
+        // These two exist to be sent while an axis is turning - that is the
+        // whole point of them - so they do not go through the busy refusal.
+        switch (c.verb) {
+        case Verb::Target: return do_target(c, s);
+        case Verb::Track:  return do_track(c, s);
+        default:           return do_while_moving(c);
+        }
     }
 
     switch (c.verb) {
-    case Verb::Move:     return do_move(c, s);
+    case Verb::Move:     return do_move(c, s, false);
+    case Verb::MoveTo:   return do_move(c, s, true);
     case Verb::Stop:     return do_stop_when_idle(c);
     case Verb::Estop:    return do_stop_when_idle(c);
     case Verb::Zero:     return do_zero(c, s);
@@ -364,8 +505,11 @@ Decision decide(const Command &c, const MachineState &s)
     case Verb::Ping:     return do_ping(c, s);
     case Verb::Set:      return do_set(c, s);
     case Verb::Save:     return do_save(c);
-    case Verb::Defaults: return do_defaults(c);
+    case Verb::Defaults: return do_defaults(c, s);
     case Verb::Settings: return do_settings(c, s);
+    case Verb::Gear:     return do_gear(c, s);
+    case Verb::Track:    return do_track(c, s);
+    case Verb::Target:   return do_target(c, s);
     case Verb::None:     break;
     }
     return Decision{};

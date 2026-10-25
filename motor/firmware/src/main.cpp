@@ -27,6 +27,15 @@
 // is sent after the last pulse, and a command that arrives mid-move is
 // answered with a single short line.
 //
+// TRACKING IS THE ONE EXCEPTION, and it has to be, because while tracking an
+// axis is nearly always turning - so that rule would mean no telemetry at
+// all, ever. The TRK stream goes out through send_if_room(), which asks the
+// USB layer whether a whole line will fit and drops the line if it will not.
+// It never waits. A dropped telemetry line costs a moment of staleness on
+// screen; a wait would cost a stalled step loop, which is worse. Only the
+// tracking reports are sent this way - everything else still goes out at a
+// moment when nothing is turning.
+//
 // Deliberately absent:
 //   no ENA, no ALM     not wired on this board; the Pico cannot disable a
 //                      driver and cannot tell when one faults
@@ -36,6 +45,7 @@
 
 #include "pico/stdio_usb.h"
 #include "pico/stdlib.h"
+#include "tusb.h"
 
 #include "command_parser.hpp"
 #include "command_rules.hpp"
@@ -49,17 +59,36 @@
 
 constexpr uint32_t HEARTBEAT_PERIOD_MS = 5000;
 
+// How often the TRK stream goes out while tracking. Fast enough to watch the
+// error settle, slow enough that it is a rounding error against the step
+// loop, which runs tens of thousands of times a second.
+constexpr uint32_t TRACK_REPORT_MS = 100;
+
+// Which gearing the maths counts: the gearbox alone, or the gearbox and the
+// final pair. Direct until a saved record says otherwise, because a wrong
+// guess that way undershoots instead of driving into a hard stop.
+static GearMode g_gear = GearMode::Direct;
+
 // The settings in force - acceleration and travel, which can be changed at
-// the prompt. They start as the built-in ones and at startup are replaced by
-// any good ones saved in flash. The steppers read their fixed numbers (steps
-// per degree, direction) from here too, so each axis has one description.
+// the prompt. They start as the built-in ones for g_gear and at startup are
+// replaced by any good ones saved in flash. The steppers read their fixed
+// numbers (steps per degree, direction) from here too, so each axis has one
+// description, and switching gear mode rewrites it in place.
 static AxisSpec g_az_spec = AZ_SPEC;
 static AxisSpec g_el_spec = EL_SPEC;
 
 // What a restart would come back with, so the laptop can be told whether the
-// settings in force have been saved.
-static AxisSpec g_boot_az = AZ_SPEC;
-static AxisSpec g_boot_el = EL_SPEC;
+// settings in force have been saved. The gear mode is saved with them.
+static GearMode g_boot_gear = GearMode::Direct;
+static AxisSpec g_boot_az   = AZ_SPEC;
+static AxisSpec g_boot_el   = EL_SPEC;
+
+// True once TRACK ON was accepted, and when the last target arrived. If
+// targets stop coming, the watchdog in the main loop brings the axes to rest:
+// without it a radio dropout leaves the antenna driving at a target that is
+// minutes stale.
+static bool g_tracking = false;
+static absolute_time_t g_last_target = {};
 
 static Stepper g_az(g_az_spec, PIN_AZ_PUL, PIN_AZ_DIR);
 static Stepper g_el(g_el_spec, PIN_EL_PUL, PIN_EL_DIR);
@@ -74,6 +103,24 @@ static void send(size_t n)
     if (n > 0) {
         fputs(g_out, stdout);
     }
+}
+
+// Send only if the whole line will fit in the USB buffer right now.
+//
+// TinyUSB is asked how much room there is, and the write still goes out
+// through stdio as every other reply does - so this is a gate, not a second
+// way of writing. If there is not room the line is dropped and never
+// mentioned again, which is the right trade while an axis is turning: a
+// stale reading on screen beats a stalled step loop.
+static void send_if_room(size_t n)
+{
+    if (n == 0) {
+        return;
+    }
+    if (!tud_cdc_connected() || tud_cdc_write_available() < n) {
+        return;
+    }
+    fputs(g_out, stdout);
 }
 
 // ----------------------------------------------------------------------------
@@ -125,9 +172,12 @@ static void fatal_forever(const char *reason)
 // this build, otherwise the built-in ones.
 static LoadResult read_boot_settings()
 {
-    g_boot_az = AZ_SPEC;
-    g_boot_el = EL_SPEC;
-    return load_settings(&g_boot_az, &g_boot_el);
+    // Seeded with direct mode and its numbers, so a record that is blank,
+    // corrupt or stale leaves the machine counting the gearbox alone.
+    g_boot_gear = GearMode::Direct;
+    g_boot_az   = AZ_SPEC;
+    g_boot_el   = EL_SPEC;
+    return load_settings(&g_boot_gear, &g_boot_az, &g_boot_el);
 }
 
 static const char *settings_note(LoadResult r)
@@ -143,11 +193,23 @@ static const char *settings_note(LoadResult r)
     return "built in";
 }
 
+// Spelled out rather than just "on" or "off": getting this wrong puts every
+// move out by the gear pair's ratio, and this line is the operator's one
+// chance to notice before they type a move.
+static const char *gear_note(GearMode g)
+{
+    return (g == GearMode::Geared)
+               ? "GEARED - final pair counted, angles at the ANTENNA"
+               : "direct - gearbox only, angles at the GEARBOX OUTPUT SHAFT";
+}
+
 static void print_banner(LoadResult loaded)
 {
     printf("[motor] pins AZ PUL=GP%u DIR=GP%u  EL PUL=GP%u DIR=GP%u  idle HIGH OK\n",
            PIN_AZ_PUL, PIN_AZ_DIR, PIN_EL_PUL, PIN_EL_DIR);
     printf("[motor] active low: PUL rests HIGH and is pulled LOW to step\n");
+
+    printf("[motor] gear %s\n", gear_note(g_gear));
 
     printf("[motor] ready az=");
     print_steps_per_deg(g_az_spec);
@@ -173,6 +235,14 @@ static void print_banner(LoadResult loaded)
 
     printf("[motor] settings: %s\n", settings_note(loaded));
 
+    printf("[motor] deadband az ");
+    print_mdeg(g_az_spec.deadband_mdeg);
+    printf("  el ");
+    print_mdeg(g_el_spec.deadband_mdeg);
+    printf(" deg (tracking only)\n");
+
+    printf("[motor] tracking %s\n", g_tracking ? "ARMED" : "off");
+
     printf("[motor] NOT ZEROED - send ZERO before any MOVE\n");
 }
 
@@ -188,14 +258,21 @@ static void print_banner(LoadResult loaded)
 static MachineState snapshot()
 {
     MachineState s;
-    s.busy         = g_az.moving() || g_el.moving();
+    s.busy         = g_az.busy() || g_el.busy();
     s.az_zeroed    = g_az.zeroed();
     s.el_zeroed    = g_el.zeroed();
     s.az_pos_steps = g_az.pos_steps();
     s.el_pos_steps = g_el.pos_steps();
+    s.gear         = g_gear;
+    s.tracking     = g_tracking;
+    s.az_target_steps = g_az.target_steps();
+    s.el_target_steps = g_el.target_steps();
+    s.az_mdps      = g_az.velocity_mdps();
+    s.el_mdps      = g_el.velocity_mdps();
     s.az_spec      = g_az_spec;
     s.el_spec      = g_el_spec;
-    s.settings_unsaved = !same_settings(g_az_spec, g_boot_az) ||
+    s.settings_unsaved = g_gear != g_boot_gear ||
+                         !same_settings(g_az_spec, g_boot_az) ||
                          !same_settings(g_el_spec, g_boot_el);
     s.uptime_ms    = to_ms_since_boot(get_absolute_time());
     s.target       = GS_TARGET_NAME;
@@ -216,13 +293,6 @@ static void set_test_pin(const Decision &d)
         gpio_set_dir(d.gpio, GPIO_OUT);
     }
     gpio_put(d.gpio, d.level != 0);
-
-    if (d.clear_az_zero) {
-        g_az.clear_zero();
-    }
-    if (d.clear_el_zero) {
-        g_el.clear_zero();
-    }
 }
 
 // Carry out what decide() asked for. Nothing here chooses anything.
@@ -249,10 +319,14 @@ static void apply(const Decision &d)
         }
         break;
     case Act::RequestStop:
+        // A stop while tracking means stop tracking: the axes ramp to rest
+        // and no further target will move them until TRACK ON again.
+        g_tracking = false;
         g_az.request_stop();
         g_el.request_stop();
         break;
     case Act::Estop:
+        g_tracking = false;
         g_az.estop();
         g_el.estop();
         break;
@@ -273,6 +347,48 @@ static void apply(const Decision &d)
         break;
     case Act::SaveSettings:
         break;  // already done in handle(), before the reply
+    case Act::SetTrack:
+        g_tracking = d.track_on;
+        if (d.track_on) {
+            g_az.arm_chase();
+            g_el.arm_chase();
+            // Counted from here, so arming does not immediately look like a
+            // dropout to the watchdog.
+            g_last_target = get_absolute_time();
+        } else {
+            g_az.disarm_chase();
+            g_el.disarm_chase();
+        }
+        break;
+    case Act::SetTarget:
+        g_az.set_target_steps(d.az_steps);
+        g_el.set_target_steps(d.el_steps);
+        g_last_target = get_absolute_time();
+        break;
+    case Act::SetGear:
+        // Both specs are replaced whole, not just their settable numbers:
+        // the mode decides steps per degree and every speed number too.
+        g_gear    = d.gear;
+        g_az_spec = d.az_spec;
+        g_el_spec = d.el_spec;
+        // A degree means something different now, so any target in hand is
+        // meaningless and the zeros are gone. A gear change is refused while
+        // tracking, so this is only a backstop.
+        g_tracking = false;
+        g_az.disarm_chase();
+        g_el.disarm_chase();
+        break;
+    }
+
+    // An axis stops knowing where it is when a step goes out uncounted (a
+    // step pin driven by hand) or when the drive train changes under it (a
+    // gear mode switch). Either way it has to be re-zeroed before it may
+    // move again.
+    if (d.clear_az_zero) {
+        g_az.clear_zero();
+    }
+    if (d.clear_el_zero) {
+        g_el.clear_zero();
     }
 }
 
@@ -285,9 +401,9 @@ static void handle(const Command &c)
     // back, the same way the next startup will, so the ACK means a restart
     // will come back with these settings.
     if (d.act == Act::SaveSettings) {
-        save_settings(g_az_spec, g_el_spec);
+        save_settings(g_gear, g_az_spec, g_el_spec);
         read_boot_settings();
-        if (!same_settings(g_boot_az, g_az_spec) ||
+        if (g_boot_gear != g_gear || !same_settings(g_boot_az, g_az_spec) ||
             !same_settings(g_boot_el, g_el_spec)) {
             send(format_err(g_out, sizeof(g_out), c.id, ErrCode::Flash, ""));
             return;
@@ -318,6 +434,22 @@ static void poll_input()
             send(format_err(g_out, sizeof(g_out), 0, ErrCode::TooLong, ""));
         }
     }
+}
+
+// What the TRK stream says. Built from the steppers rather than from a
+// snapshot, because it is sent from the loop rather than in answer to a
+// command.
+static TrackReport track_report()
+{
+    TrackReport r{};
+    r.armed          = g_tracking;
+    r.az_target_mdeg = steps_to_mdeg(g_az_spec, g_az.target_steps());
+    r.az_pos_mdeg    = g_az.pos_mdeg();
+    r.az_mdps        = g_az.velocity_mdps();
+    r.el_target_mdeg = steps_to_mdeg(g_el_spec, g_el.target_steps());
+    r.el_pos_mdeg    = g_el.pos_mdeg();
+    r.el_mdps        = g_el.velocity_mdps();
+    return r;
 }
 
 // Called once each time an axis finishes, to report what it did.
@@ -351,6 +483,7 @@ int main()
         fatal_forever("the program has grown into the settings sector");
     }
     const LoadResult loaded = read_boot_settings();
+    g_gear    = g_boot_gear;
     g_az_spec = g_boot_az;
     g_el_spec = g_boot_el;
 
@@ -358,6 +491,7 @@ int main()
 
     absolute_time_t next_heartbeat =
         delayed_by_ms(get_absolute_time(), HEARTBEAT_PERIOD_MS);
+    absolute_time_t next_track_report = next_heartbeat;
     bool was_moving = false;
 
     for (;;) {
@@ -383,6 +517,33 @@ int main()
         }
         was_moving = moving;
 
+        // The watchdog. Targets arriving is the only sign the other end is
+        // still there, so if they stop, the axes come to rest and stay
+        // there until something arms tracking again. This is what a radio
+        // dropout or a closed laptop looks like from here.
+        if (g_tracking &&
+            absolute_time_diff_us(g_last_target, now) >
+                static_cast<int64_t>(TRACK_TIMEOUT_MS) * 1000) {
+            g_tracking = false;
+            g_az.disarm_chase();
+            g_el.disarm_chase();
+            // The axes are still slowing down, so these go out the same
+            // never-wait way as the stream. The laptop may well be gone -
+            // that is usually why the targets stopped.
+            send_if_room(format_trk(g_out, sizeof(g_out), 0, track_report()));
+            send_if_room(static_cast<size_t>(snprintf(
+                g_out, sizeof(g_out),
+                "[motor] no target for %lu ms - tracking stopped\n",
+                static_cast<unsigned long>(TRACK_TIMEOUT_MS))));
+        }
+
+        // The tracking stream. Sent through send_if_room() because an axis
+        // is turning - see the rule at the top of this file.
+        if (g_tracking && absolute_time_diff_us(now, next_track_report) <= 0) {
+            next_track_report = delayed_by_ms(now, TRACK_REPORT_MS);
+            send_if_room(format_trk(g_out, sizeof(g_out), 0, track_report()));
+        }
+
         // The heartbeat stays quiet while moving - see the rule at the top of
         // this file - and while someone is part way through typing a line,
         // where it would scramble the screen.
@@ -390,7 +551,7 @@ int main()
         // Either way the deadline is pushed along rather than left in the
         // past, so the heartbeat resumes a full period after things go quiet
         // instead of firing the instant a move ends or a line is finished.
-        if (moving || g_reader.partial()) {
+        if (moving || g_tracking || g_reader.partial()) {
             next_heartbeat = delayed_by_ms(now, HEARTBEAT_PERIOD_MS);
         } else if (absolute_time_diff_us(now, next_heartbeat) <= 0) {
             next_heartbeat = delayed_by_ms(now, HEARTBEAT_PERIOD_MS);

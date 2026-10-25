@@ -9,6 +9,7 @@ The two directions, one line each, "\n" terminated:
 
     laptop -> Pico                      Pico -> laptop
     MOVE,<id>,<AZ|EL>,<mdps>,<mdeg>     ACK,<id>,<verb>
+    MOVETO,<id>,<AZ|EL>,<mdps>,<mdeg>
     STOP,<id>                           PLAN,<id>,<axis>,<steps>,...
     ESTOP,<id>                          DONE,<id>,<axis>,<OK|ABORT>,...
     ZERO,<id>,<AZ|EL|ALL>[,<mdeg>]      POS,<id>,<az>,<el>,...
@@ -18,17 +19,50 @@ The two directions, one line each, "\n" terminated:
     PING,<id>                           MSTAT,<uptime_s>,<az>,<el>,...
     SET,<id>,<AZ|EL>,<name>,<value>     ERR,<id>,<code>,<detail>
     SAVE,<id>                           CFG,<id>,<az_accel>,...
-    DEFAULTS,<id>
-    SETTINGS,<id>
+    DEFAULTS,<id>                       GEAR,<id>,<ON|OFF>,<az_num>,...
+    SETTINGS,<id>                       TRK,<id>,<ON|OFF>,<az_target>,...
+    GEAR,<id>[,<ON|OFF>]
+    TRACK,<id>[,<ON|OFF>]
+    TARGET,<id>,<az_mdeg>,<el_mdeg>
 
 A MOVE can also turn both axes at once, each at its own speed:
 `MOVE,<id>,AZ,<mdps>,<mdeg>,EL,<mdps>,<mdeg>`. It is answered with one ACK,
 a PLAN for each axis, and later a DONE for each - both DONEs only once the
 slower axis has stopped.
 
+MOVETO is the same command with the angle read as **where to end up** rather
+than how far to turn, and takes both shapes too. The Pico does the
+subtraction, because the step count is the only record of where the axis is
+and it lives on that side - a laptop working out "target minus where I last
+heard it was" would be using a copy up to half a second old. The ACK echoes
+whichever verb was sent, so the two can be told apart.
+
 SET changes one setting on one axis - ACCEL, or the MIN or MAX travel limit
 - until the Pico restarts. SAVE keeps the settings in flash, DEFAULTS goes
 back to the built-in ones from motor_config.hpp, and SETTINGS reports them.
+
+TRACK arms and disarms tracking; TARGET says where to point while it is
+armed. A target is absolute, names both axes, and is answered with **nothing
+at all** when accepted - it arrives several times a second and an ACK apiece
+would double the traffic without saying anything the TRK stream is not
+already saying. Only a refusal comes back.
+
+TRK answers TRACK, and also arrives unprompted a few times a second while
+tracking, with an id of 0. It is the only report that comes out while an axis
+is turning, and it carries position because POS cannot be asked for then.
+
+If targets stop arriving the Pico gives up tracking by itself after
+TRACK_TIMEOUT_MS and says so. That is what a radio dropout or a closed laptop
+looks like from the far end, and it is why a target can be clamped into the
+travel limits rather than refused.
+
+GEAR asks which gearing the Pico is counting, or switches it. OFF is the
+10:1 gearbox alone, with angles at the gearbox output shaft and each axis
+driven on its own. ON adds the final gear pair, with angles at the antenna.
+Switching costs both axes their zero, because the drive train has changed.
+The mode is saved by SAVE along with everything else, and it changes what a
+degree means, so every angle in a results file belongs to one mode or the
+other.
 
 Two rules run through all of it.
 
@@ -71,9 +105,15 @@ GPIO_MAX = 29
 MOVE_AXES = ("AZ", "EL")
 ZERO_AXES = ("AZ", "EL", "ALL")
 
-# What SET can change: acceleration in deg/sec/sec, and the travel limits in
-# degrees. Both cross the wire in thousandths, like every other number.
-SETTING_NAMES = ("ACCEL", "MIN", "MAX")
+# The two words GEAR and TRACK take and report. For GEAR, ON means the final
+# gear pair is in the maths; for TRACK, that tracking is armed.
+ON = "ON"
+OFF = "OFF"
+
+# What SET can change: acceleration in deg/sec/sec, the travel limits and the
+# deadband in degrees. All cross the wire in thousandths, like every other
+# number.
+SETTING_NAMES = ("ACCEL", "MIN", "MAX", "DEADBAND")
 
 # Every axis word the firmware can put in a reply, including the two that
 # only turn up in errors.
@@ -94,6 +134,7 @@ ERR_MEANING = {
     "setting": "no such setting - use accel, min or max",
     "range": "that value is outside what this build allows",
     "flash": "the Pico could not write its flash, so nothing was saved",
+    "track": "tracking is not armed - send track on first",
 }
 
 
@@ -195,6 +236,33 @@ def move(cmd_id: int, axis: str, speed_dps: float, delta_deg: float) -> str:
     """
     _check_id(cmd_id)
     return f"MOVE,{cmd_id},{_move_half(axis, speed_dps, delta_deg)}"
+
+
+def move_to(cmd_id: int, axis: str, speed_dps: float, deg: float) -> str:
+    """Turn an axis until it is pointing at `deg`, measured from the zero.
+
+    The same as `move` in every way but what the angle means. The Pico works
+    out how far that is from where the axis actually is, checks it against
+    the soft limits, and reports the end angle it will really stop at in its
+    PLAN - which is the nearest whole step, not necessarily the angle asked
+    for.
+    """
+    _check_id(cmd_id)
+    return f"MOVETO,{cmd_id},{_move_half(axis, speed_dps, deg)}"
+
+
+def move_to_both(
+    cmd_id: int,
+    az_speed_dps: float,
+    az_deg: float,
+    el_speed_dps: float,
+    el_deg: float,
+) -> str:
+    """Point both axes, each at its own speed. Absolute, like `move_to`."""
+    _check_id(cmd_id)
+    az = _move_half("AZ", az_speed_dps, az_deg)
+    el = _move_half("EL", el_speed_dps, el_deg)
+    return f"MOVETO,{cmd_id},{az},{el}"
 
 
 def move_both(
@@ -323,6 +391,56 @@ def settings(cmd_id: int) -> str:
     return f"SETTINGS,{_check_id(cmd_id)}"
 
 
+def track(cmd_id: int, on: bool | None = None) -> str:
+    """Ask whether tracking is armed, or arm and disarm it.
+
+    Arming needs both axes zeroed, and is refused with ERR nozero otherwise.
+    Disarming is never refused - it is the way out - and brings both axes to
+    a ramped stop rather than cutting the pulses.
+
+    While armed the Pico sends a TRK line a few times a second without being
+    asked, and gives up by itself if targets stop arriving.
+    """
+    _check_id(cmd_id)
+    if on is None:
+        return f"TRACK,{cmd_id}"
+    return f"TRACK,{cmd_id},{ON if on else OFF}"
+
+
+def target(cmd_id: int, az_deg: float, el_deg: float) -> str:
+    """Where to point, absolute, both axes. Only acted on while armed.
+
+    Fire and forget: the Pico answers an accepted target with nothing at all,
+    so there is no reply to wait for. Send it as often as fixes arrive.
+
+    A target outside an axis's travel limits is held at the limit rather than
+    refused, so the antenna keeps pointing as close as it can and picks the
+    rocket up again by itself when it comes back into range.
+    """
+    _check_id(cmd_id)
+    az = _check_mdeg(deg_to_mdeg(az_deg), az_deg, "azimuth")
+    el = _check_mdeg(deg_to_mdeg(el_deg), el_deg, "elevation")
+    return f"TARGET,{cmd_id},{az},{el}"
+
+
+def gear(cmd_id: int, on: bool | None = None) -> str:
+    """Ask which gearing the Pico is counting, or switch it.
+
+    `on` left out asks the question and changes nothing. True folds the
+    final gear pair into the maths (angles at the antenna), False counts the
+    10:1 gearbox alone (angles at the gearbox output shaft, each axis driven
+    on its own).
+
+    Switching is refused while anything is moving, and when it does go
+    through it costs both axes their zero: the drive train is physically
+    different, so the step count no longer describes a known angle.
+    """
+    _check_id(cmd_id)
+    if on is None:
+        return f"GEAR,{cmd_id}"
+    return f"GEAR,{cmd_id},{ON if on else OFF}"
+
+
 def encode(line: str) -> bytes:
     """A command line as the bytes to write to the port.
 
@@ -433,34 +551,130 @@ class Lim(Reply):
 
     The travel limits are the built-in ones unless settings have narrowed
     them.
+
+    The speed ceiling is per axis, because geared mode scales each axis's
+    down by its own gear pair - azimuth ends up slower than elevation. The
+    floor is shared. Ask which axis you mean rather than assuming they
+    match.
     """
 
     id: int
     az_min_mdeg: int
     az_max_mdeg: int
+    az_speed_max_mdps: int
     el_min_mdeg: int
     el_max_mdeg: int
+    el_speed_max_mdps: int
     speed_min_mdps: int
-    speed_max_mdps: int
+
+    def speed_max_for(self, axis: str) -> int:
+        """That axis's ceiling, in millidegrees per second."""
+        return (
+            self.el_speed_max_mdps
+            if str(axis).strip().upper() == "EL"
+            else self.az_speed_max_mdps
+        )
 
 
 @dataclass(frozen=True)
 class Cfg(Reply):
     """The settings in force: acceleration and travel, per axis.
 
-    `saved` means a restart would come back with these same settings.
-    `built_in` means they are the numbers in motor_config.hpp.
+    `geared` says which gearing these numbers belong to. It is here rather
+    than only in Gear because switching gear is one of the things that makes
+    the settings unsaved, and because the built-in numbers differ per mode -
+    `built_in` means "the numbers in motor_config.hpp for this mode".
+
+    `saved` means a restart would come back with all of this, mode included.
     """
 
     id: int
     az_accel_mdps2: int
     az_min_mdeg: int
     az_max_mdeg: int
+    az_deadband_mdeg: int
     el_accel_mdps2: int
     el_min_mdeg: int
     el_max_mdeg: int
+    el_deadband_mdeg: int
+    geared: bool
     saved: bool
     built_in: bool
+
+    def deadband_for(self, axis: str) -> int:
+        return (self.el_deadband_mdeg
+                if str(axis).strip().upper() == "EL"
+                else self.az_deadband_mdeg)
+
+
+@dataclass(frozen=True)
+class Gear(Reply):
+    """Which gearing the Pico is counting, and what it makes a degree worth.
+
+    The steps per degree come over as the exact fraction the Pico divides
+    by, not a decimal, so what is shown is what is being applied:
+
+        direct   400/9    = 44.444 steps per gearbox-output degree
+        geared   12800/126 = 101.587 steps per antenna degree (azimuth)
+                 8000/126  =  63.492 steps per antenna degree (elevation)
+    """
+
+    id: int
+    geared: bool
+    az_steps_num: int
+    az_steps_den: int
+    el_steps_num: int
+    el_steps_den: int
+
+    @property
+    def az_steps_per_deg(self) -> float:
+        return self.az_steps_num / self.az_steps_den
+
+    @property
+    def el_steps_per_deg(self) -> float:
+        return self.el_steps_num / self.el_steps_den
+
+    def describe(self) -> str:
+        """One line fit to print to the operator."""
+        if self.geared:
+            return "geared - final pair counted, angles at the ANTENNA"
+        return "direct - gearbox only, angles at the GEARBOX OUTPUT SHAFT"
+
+
+@dataclass(frozen=True)
+class Trk(Reply):
+    """Where tracking is pointing, where it has got to, and how fast.
+
+    `id` is 0 on the ones that arrive unprompted, which is most of them -
+    only the answer to a TRACK command carries the id that asked.
+
+    This is the only report that comes out while an axis is turning, so it
+    carries position: POS is refused then. `armed` going False without
+    anyone asking means the Pico's watchdog gave up, because targets stopped
+    arriving.
+    """
+
+    id: int
+    armed: bool
+    az_target_mdeg: int
+    az_pos_mdeg: int
+    az_mdps: int
+    el_target_mdeg: int
+    el_pos_mdeg: int
+    el_mdps: int
+
+    @property
+    def az_error_mdeg(self) -> int:
+        return self.az_target_mdeg - self.az_pos_mdeg
+
+    @property
+    def el_error_mdeg(self) -> int:
+        return self.el_target_mdeg - self.el_pos_mdeg
+
+    def error_for(self, axis: str) -> int:
+        return (self.el_error_mdeg
+                if str(axis).strip().upper() == "EL"
+                else self.az_error_mdeg)
 
 
 @dataclass(frozen=True)
@@ -562,8 +776,8 @@ class Info(Reply):
 # human and is passed through untouched.
 RECORD_NAMES = frozenset(
     {
-        "ACK", "PLAN", "DONE", "POS", "PIN", "LIM", "CFG", "PONG", "MSTAT",
-        "ERR",
+        "ACK", "PLAN", "DONE", "POS", "PIN", "LIM", "CFG", "GEAR", "TRK",
+        "PONG", "MSTAT", "ERR",
     }
 )
 
@@ -667,28 +881,54 @@ def parse_reply(line: str) -> Reply:
         if name == "PIN" and len(f) == 4:
             return Pin(id=_int(f[1]), gpio=_int(f[2]), level=_int(f[3]))
 
-        if name == "LIM" and len(f) == 8:
+        if name == "LIM" and len(f) == 9:
             return Lim(
                 id=_int(f[1]),
                 az_min_mdeg=_int(f[2]),
                 az_max_mdeg=_int(f[3]),
-                el_min_mdeg=_int(f[4]),
-                el_max_mdeg=_int(f[5]),
-                speed_min_mdps=_int(f[6]),
-                speed_max_mdps=_int(f[7]),
+                az_speed_max_mdps=_int(f[4]),
+                el_min_mdeg=_int(f[5]),
+                el_max_mdeg=_int(f[6]),
+                el_speed_max_mdps=_int(f[7]),
+                speed_min_mdps=_int(f[8]),
             )
 
-        if name == "CFG" and len(f) == 10:
+        if name == "CFG" and len(f) == 13:
             return Cfg(
                 id=_int(f[1]),
                 az_accel_mdps2=_int(f[2]),
                 az_min_mdeg=_int(f[3]),
                 az_max_mdeg=_int(f[4]),
-                el_accel_mdps2=_int(f[5]),
-                el_min_mdeg=_int(f[6]),
-                el_max_mdeg=_int(f[7]),
-                saved=_word(f[8], "SAVED", "UNSAVED"),
-                built_in=_word(f[9], "BUILTIN", "CUSTOM"),
+                az_deadband_mdeg=_int(f[5]),
+                el_accel_mdps2=_int(f[6]),
+                el_min_mdeg=_int(f[7]),
+                el_max_mdeg=_int(f[8]),
+                el_deadband_mdeg=_int(f[9]),
+                geared=_word(f[10], "GEARED", "DIRECT"),
+                saved=_word(f[11], "SAVED", "UNSAVED"),
+                built_in=_word(f[12], "BUILTIN", "CUSTOM"),
+            )
+
+        if name == "TRK" and len(f) == 9:
+            return Trk(
+                id=_int(f[1]),
+                armed=_word(f[2], ON, OFF),
+                az_target_mdeg=_int(f[3]),
+                az_pos_mdeg=_int(f[4]),
+                az_mdps=_int(f[5]),
+                el_target_mdeg=_int(f[6]),
+                el_pos_mdeg=_int(f[7]),
+                el_mdps=_int(f[8]),
+            )
+
+        if name == "GEAR" and len(f) == 7:
+            return Gear(
+                id=_int(f[1]),
+                geared=_word(f[2], ON, OFF),
+                az_steps_num=_int(f[3]),
+                az_steps_den=_int(f[4]),
+                el_steps_num=_int(f[5]),
+                el_steps_den=_int(f[6]),
             )
 
         if name == "PONG" and len(f) == 5:
