@@ -51,6 +51,11 @@ POLL_INTERVAL_S = 0.5
 # again. Small enough that a quit or a reconnect feels immediate.
 JOB_WAIT_S = 0.05
 
+# How long each attempt to collect a move's DONE waits before the worker
+# looks at the stop flags again. A move can run for a minute, and this is how
+# soon a stop reaches it.
+MOVE_SLICE_S = 0.2
+
 
 @dataclass(frozen=True)
 class State:
@@ -70,6 +75,12 @@ class State:
 
     moving: bool = False
     rebooted: bool = False
+
+    # True while the worker is inside a session call. Distinct from `moving`,
+    # which is what the Pico reports: a zero or a settings change makes the
+    # worker busy without turning a motor. The window disables controls on
+    # either.
+    working: bool = False
 
     pos: p.Pos | None = None
     gear: p.Gear | None = None
@@ -95,6 +106,8 @@ class State:
             return "the Pico restarted - re-zero before moving"
         if self.moving:
             return "moving"
+        if self.working:
+            return "working"
         if self.error:
             return self.error
         if not self.zeroed:
@@ -110,6 +123,12 @@ EVENT_STATE = "state"
 EVENT_LINE = "line"
 EVENT_NOTE = "note"
 
+# MOVE carries the plans of a move that has just started, so the window can
+# show how long it should take; DONE carries the outcomes once it has
+# finished. Neither is needed to drive the move - they are for the display.
+EVENT_MOVE = "move"
+EVENT_DONE = "done"
+
 
 @dataclass
 class _Job:
@@ -120,8 +139,9 @@ class _Job:
 class MotorWorker(threading.Thread):
     """Owns one Session and answers for it.
 
-    Construct it, `start()` it, read `events` on the UI thread, and `stop()`
-    it on the way out. `open_session` is injectable so a test can hand over a
+    Construct it, `start()` it, read `events` on the UI thread, and
+    `shutdown()` it on the way out. `stop()` and `estop()` stop a *motor*,
+    not this thread. `open_session` is injectable so a test can hand over a
     fake Pico instead of a serial port.
     """
 
@@ -131,6 +151,14 @@ class MotorWorker(threading.Thread):
         self.events: queue.Queue = queue.Queue()
         self._jobs: queue.Queue = queue.Queue()
         self._stopping = threading.Event()
+
+        # Stop and estop do not queue. A move holds the worker for as long as
+        # it runs, and a stop that waited its turn behind the move it is
+        # meant to cut short would be no stop at all. They are flags the
+        # worker checks while it waits, which is also why they are idempotent
+        # - pressing twice is the same as pressing once.
+        self._stop_req = threading.Event()
+        self._estop_req = threading.Event()
         self._port = port
         self._open = open_session or sn.Session.open
         self._clock = clock
@@ -139,8 +167,12 @@ class MotorWorker(threading.Thread):
 
     # --- the UI thread's side ----------------------------------------------
 
-    def stop(self) -> None:
-        """Ask the worker to close the port and finish. Safe to call twice."""
+    def shutdown(self) -> None:
+        """Close the port and finish the thread. Safe to call twice.
+
+        Named apart from `stop`, which stops a motor. The two were briefly
+        the same name and the lifecycle one lost, so the thread never exited.
+        """
         self._stopping.set()
 
     def reconnect(self, port: str | None = None) -> None:
@@ -149,6 +181,37 @@ class MotorWorker(threading.Thread):
     def poll_now(self) -> None:
         """Ask for a fresh State without waiting for the next tick."""
         self._jobs.put(_Job("poll"))
+
+    def stop(self) -> None:
+        """Ramp both axes to a halt. Jumps the queue; safe to call any time."""
+        self._stop_req.set()
+
+    def estop(self) -> None:
+        """Halt at once, forfeiting the zero. Jumps the queue."""
+        self._estop_req.set()
+
+    def zero(self, axis: str = "ALL", deg: float | None = None) -> None:
+        self._jobs.put(_Job("zero", (axis, deg)))
+
+    def move(self, axis: str, speed_dps: float, delta_deg: float) -> None:
+        self._jobs.put(_Job("move", (axis, speed_dps, delta_deg)))
+
+    def move_both(self, az_speed: float, az_delta: float, el_speed: float,
+                  el_delta: float) -> None:
+        self._jobs.put(
+            _Job("move_both", (az_speed, az_delta, el_speed, el_delta)))
+
+    def set_gear(self, on: bool) -> None:
+        self._jobs.put(_Job("gear", (on,)))
+
+    def set_setting(self, axis: str, name: str, value: float) -> None:
+        self._jobs.put(_Job("set", (axis, name, value)))
+
+    def save(self) -> None:
+        self._jobs.put(_Job("save"))
+
+    def defaults(self) -> None:
+        self._jobs.put(_Job("defaults"))
 
     # --- the worker's side -------------------------------------------------
 
@@ -237,6 +300,136 @@ class MotorWorker(threading.Thread):
         self._set_state(pos=pos, gear=gear, cfg=cfg, lim=lim, moving=False,
                         error="")
 
+    # --- carrying out a job ------------------------------------------------
+
+    def _apply_urgent(self) -> bool:
+        """Send a stop or estop if one has been asked for.
+
+        Called both while idle and in the middle of waiting out a move, which
+        is the whole reason these two are flags rather than queued jobs.
+        Estop wins if both are set.
+        """
+        session = self._session
+        if session is None:
+            self._stop_req.clear()
+            self._estop_req.clear()
+            return False
+
+        if self._estop_req.is_set():
+            self._estop_req.clear()
+            self._stop_req.clear()
+            session.estop()
+            self._emit(EVENT_NOTE,
+                       "emergency stop sent - re-zero before moving again")
+            return True
+        if self._stop_req.is_set():
+            self._stop_req.clear()
+            session.stop()
+            self._emit(EVENT_NOTE,
+                       "stop sent - waiting for it to come to rest")
+            return True
+        return False
+
+    def _await_move(self, plans) -> None:
+        """Wait out every axis of a move, staying able to stop it.
+
+        `await_done` is documented as safe to call again after a Timeout - the
+        move keeps running on the Pico whatever this end does - so it is
+        called with a short timeout in a loop and the urgent flags are checked
+        between attempts. Same shape as the Ctrl-C handling in motor.py's
+        `_wait_out`.
+        """
+        session = self._session
+        if session is None:
+            return
+
+        self._emit(EVENT_MOVE, list(plans))
+        deadline = self._clock() + sn.move_timeout_s(*plans)
+        outcomes = []
+
+        for plan in plans:
+            while True:
+                self._apply_urgent()
+                try:
+                    done = session.await_done(plan, timeout_s=MOVE_SLICE_S)
+                except sn.Timeout:
+                    if self._stopping.is_set():
+                        # The window is closing with an axis still turning.
+                        # Leaving it running is worse than losing the zero.
+                        session.estop()
+                        return
+                    if self._clock() > deadline:
+                        raise
+                    continue
+                outcomes.append(sn.MoveOutcome(plan, done))
+                break
+
+        self._emit(EVENT_DONE, outcomes)
+
+    def _run_job(self, job: _Job) -> None:
+        session = self._session
+        if session is None:
+            self._emit(EVENT_NOTE, "not connected")
+            return
+
+        if job.name == "zero":
+            axis, deg = job.args
+            session.zero(axis, deg)
+            where = "0.000" if deg is None else str(deg)
+            self._emit(EVENT_NOTE,
+                       axis + " is now " + where + " deg. Nothing moved.")
+        elif job.name == "move":
+            axis, speed, delta = job.args
+            self._await_move([session.begin_move(axis, speed, delta)])
+        elif job.name == "move_both":
+            self._await_move(list(session.begin_move_both(*job.args)))
+        elif job.name == "gear":
+            gear = session.set_gear(job.args[0])
+            word = "on" if gear.geared else "off"
+            self._emit(EVENT_NOTE,
+                       "gear " + word + ": " + gear.describe())
+        elif job.name == "set":
+            axis, name, value = job.args
+            session.set_setting(axis, name, value)
+            self._emit(EVENT_NOTE,
+                       axis.lower() + " " + name.lower() + " set")
+        elif job.name == "save":
+            session.save()
+            self._emit(EVENT_NOTE,
+                       "saved - a restart comes back with these settings")
+        elif job.name == "defaults":
+            session.defaults()
+            self._emit(EVENT_NOTE, "back to the built-in settings")
+
+    def _handle_job(self, job: _Job) -> None:
+        """Run one job, reporting what it ran into rather than dying.
+
+        A refusal is the Pico's answer, not a fault here, so it is shown and
+        the worker carries on. Anything that is not a SessionError would be a
+        bug in this file, and takes the thread down where it gets noticed.
+        """
+        self._set_state(working=True)
+        try:
+            self._run_job(job)
+        except p.CommandError as bad:
+            # The line was never sent: a builder would not make it. That is a
+            # fault at this end rather than the Pico's answer, but reporting
+            # it beats killing the thread and leaving a window that has
+            # quietly stopped updating.
+            self._emit(EVENT_NOTE, "cannot send that: " + str(bad))
+        except sn.Refused as refused:
+            self._emit(EVENT_NOTE, "refused: " + str(refused))
+        except sn.Rebooted as exc:
+            self._set_state(rebooted=True)
+            self._emit(EVENT_NOTE, str(exc))
+        except sn.SessionError as exc:
+            if "lost the connection" in str(exc):
+                self._close()
+                self._set_state(connected=False, error=str(exc))
+            self._emit(EVENT_NOTE, str(exc))
+        finally:
+            self._set_state(working=False)
+
     def run(self) -> None:
         self._connect(self._port)
         next_poll = self._clock()
@@ -248,12 +441,17 @@ class MotorWorker(threading.Thread):
                 except queue.Empty:
                     job = None
 
+                # Before the job, so a stop that arrived while something was
+                # queued behind it still goes first.
+                if self._apply_urgent():
+                    next_poll = self._clock()
+
                 if job is not None:
                     if job.name == "reconnect":
                         self._connect(job.args[0] or self._port)
-                        next_poll = self._clock()
-                    elif job.name == "poll":
-                        next_poll = self._clock()
+                    elif job.name != "poll":
+                        self._handle_job(job)
+                    next_poll = self._clock()
 
                 now = self._clock()
                 if self._session is not None and now >= next_poll:
