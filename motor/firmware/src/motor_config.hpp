@@ -327,8 +327,11 @@ constexpr AxisSpec EL_SPEC = {
     9,       // steps_den     -> 44.444 steps per degree
     -25000,  // min_mdeg      -25 degrees. Asked for at the bench, 25 Oct 2026
     360000,  // max_mdeg      360 degrees of the gearbox shaft
-    true,    // invert_dir    verified at the bench 25 Oct 2026: `move el
-             //               45 180` turned 180 the wrong way with false
+    false,   // invert_dir    verified at the bench 25 Oct 2026 with
+             //               10-degree moves each way. A first try with a
+             //               180-degree move suggested true, but a half
+             //               turn ends in the same place whichever way it
+             //               goes - judge direction with small moves.
     V_START_MDPS,
     135000,  // accel_mdps2   135 deg/sec/sec
     ACCEL_MIN_MDPS2,
@@ -354,7 +357,7 @@ constexpr AxisSpec EL_SPEC_GEARED =
                     //             horizon - last year's system stopped at
                     //             -10, so check the mount clears -25 first
            180000,  // max_mdeg    180 degrees of antenna
-           true);   // invert_dir  same as direct, because a belt does not
+           false);  // invert_dir  same as direct, because a belt does not
                     //             reverse rotation. Not yet seen with the
                     //             belt on - confirm on the first geared move
 
