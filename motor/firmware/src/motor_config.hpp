@@ -76,6 +76,11 @@ struct AxisSpec {
     // The fastest this axis may be commanded, in millideg/sec. See
     // SPEED_MAX_MDPS below.
     int32_t speed_max_mdps;
+
+    // How close to a target counts as being there, in millidegrees, and how
+    // far that may be set. See DEADBAND_MDEG.
+    int32_t deadband_mdeg;
+    int32_t deadband_max_mdeg;
 };
 
 // ============================================================================
@@ -122,6 +127,31 @@ constexpr int32_t SPEED_MAX_MDPS = 181000;  // 181 deg/sec
 // It is the same in both gear modes: it is not a torque number, just a guard
 // against a move that would outlast the test.
 constexpr int32_t SPEED_MIN_MDPS = 100;  // 0.1 deg/sec
+
+// ----------------------------------------------------------------------------
+// Deadband - how close to a target counts as being there
+// ----------------------------------------------------------------------------
+// Only used when chasing a target (see chase_velocity in motion_profile.hpp).
+// Inside it the axis is commanded to stop, which is what keeps it from
+// chattering back and forth on the noise in a position fix.
+//
+// NOT scaled by the gear pair, unlike every speed number here. This is a
+// tolerance on the thing being pointed: half a degree of antenna in geared
+// mode, half a degree of gearbox shaft in direct mode. mdeg_to_steps turns it
+// into the right number of steps for whichever mode is in force - 22 steps
+// direct, 51 on geared azimuth, 32 on geared elevation.
+//
+// Half a degree is where last year's ground station ran (0.35-0.5 deg on its
+// PID loop), and the antenna is a 7-element DL6WU Yagi at about 12 dBi -
+// roughly 50 deg of total beamwidth, so +/-25 deg to the half-power point.
+// Half a degree is therefore about 2% of the half-beam: validated by use, and
+// with enough margin that it can be relaxed to 1-2 deg if the mechanism turns
+// out to chatter, at no measurable cost in signal.
+//
+// Zero is allowed, and means "chase every last step". It is not useful on a
+// real fix, which is never that quiet.
+constexpr int32_t DEADBAND_MDEG     = 500;   // 0.5 deg
+constexpr int32_t DEADBAND_MAX_MDEG = 5000;  // 5   deg
 
 // ----------------------------------------------------------------------------
 // Steps per degree
@@ -204,6 +234,10 @@ enum class GearMode {
 // Travel and direction are not derived. Travel is an antenna angle rather
 // than a gearbox angle, so it is a different measurement, and whether the
 // pair reverses the axis depends on the mesh.
+//
+// The deadband is not derived either, and for the opposite reason to the
+// speeds: it is a tolerance on the output, so half a degree means half a
+// degree in both modes.
 constexpr AxisSpec geared(const AxisSpec &base, const GearPair &pair,
                           int32_t min_mdeg, int32_t max_mdeg, bool invert_dir)
 {
@@ -218,6 +252,8 @@ constexpr AxisSpec geared(const AxisSpec &base, const GearPair &pair,
         base.accel_min_mdps2 * pair.in_teeth / pair.out_teeth,
         base.accel_max_mdps2 * pair.in_teeth / pair.out_teeth,
         base.speed_max_mdps * pair.in_teeth / pair.out_teeth,
+        base.deadband_mdeg,
+        base.deadband_max_mdeg,
     };
 }
 
@@ -243,6 +279,8 @@ constexpr AxisSpec AZ_SPEC = {
     ACCEL_MIN_MDPS2,
     ACCEL_MAX_MDPS2,
     SPEED_MAX_MDPS,
+    DEADBAND_MDEG,
+    DEADBAND_MAX_MDEG,
 };
 
 // Geared: 400/9 * 32/14 = 12800/126 = 6400/63 = 101.587 steps per antenna
@@ -274,6 +312,8 @@ constexpr AxisSpec EL_SPEC = {
     ACCEL_MIN_MDPS2,
     ACCEL_MAX_MDPS2,
     SPEED_MAX_MDPS,
+    DEADBAND_MDEG,
+    DEADBAND_MAX_MDEG,
 };
 
 // Geared: 400/9 * 20/14 = 8000/126 = 4000/63 = 63.492 steps per antenna
@@ -321,6 +361,16 @@ constexpr AxisSpec el_built_in(GearMode mode)
 // toward "too slow" is the safe direction.
 constexpr uint32_t MIN_INTERVAL_US = 50;      // 20 kHz, far above anything used
 constexpr uint32_t MAX_INTERVAL_US = 500000;  // half a second between steps
+
+// The longest time step the chase loop will believe.
+//
+// It works from the gap since it last ran, and the main loop runs thousands
+// of times a second - but a flash write or a blocked USB send can hold it up
+// far longer. Taking that gap at face value would allow one enormous jump in
+// commanded speed. Clamping it means a stalled loop resumes gently instead,
+// which is the same instinct as the catch-up guard in stepper.cpp: give up
+// the lost time rather than try to make it back.
+constexpr float CHASE_MAX_DT_S = 0.05f;  // 50 ms
 
 // ============================================================================
 // Pulse timing
