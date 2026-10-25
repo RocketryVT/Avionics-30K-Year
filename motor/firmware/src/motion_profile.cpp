@@ -139,9 +139,9 @@ static PlanResult plan_from_steps(const AxisSpec &axis, int32_t pos_steps,
     //
     // The limits are written in degrees, but the machine only moves in whole
     // steps, and converting the result back to degrees rounds a second time.
-    // Checking "360 degrees" that way can fail: in geared mode azimuth's
-    // 36571 steps reads back as 359.996 and one more as 360.006,
-    // which looks past a 360.000 limit even though it is the nearest step.
+    // For example, at geared azimuth's 101.587 steps per degree, 36571 steps
+    // reads back as 359.996 and one more as 360.006 - so a 360.000 limit
+    // checked in degrees would refuse the step nearest to it.
     // Converting the limit into steps once removes the second rounding and
     // lets a move land exactly on the boundary.
     const int32_t min_steps = mdeg_to_steps(axis, axis.min_mdeg);

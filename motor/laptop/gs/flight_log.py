@@ -12,9 +12,11 @@ What each row holds, and why there are three angles rather than one:
     source_*    what the source said to point at
     target_*    what the Pico says it is pointing at
 
-They differ when a target is outside the axis's travel and gets clamped - the
-antenna is doing the best it can and the two columns say so, where one column
-would just quietly show a lie.
+They differ in two cases. A compass bearing past 180 is sent as a negative
+azimuth - 270 goes out as -90 - because the Pico's azimuth runs -180 to +180.
+And a target outside an axis's travel gets held at the limit - the antenna is
+doing the best it can, and the two columns say so where one column would just
+quietly show a lie.
 
     actual_*    where the Pico has got to
     error_*     target minus actual, which is what the chase loop is closing

@@ -35,6 +35,7 @@ from gs import protocol as p
 from gs import session as sn
 from gs import targets as tg
 
+
 def wrap_azimuth(deg: float) -> float:
     """A compass bearing as an azimuth the Pico will accept: -180 .. +180.
 
@@ -73,6 +74,13 @@ class Sample:
     fix: tg.Fix | None
     trk: p.Trk | None
 
+    # True when the direction asked for was outside an axis's travel, so the
+    # Pico is holding at the limit and doing the best it can. Worked out by
+    # the loop from the fix and the limits it read when it armed - see
+    # TrackingLoop._is_clamped. Worth showing: it means the rocket is out of
+    # reach, rather than the error failing to close for some other reason.
+    clamped: bool = False
+
     @property
     def armed(self) -> bool:
         return self.trk is not None and self.trk.armed
@@ -84,13 +92,6 @@ class Sample:
             return None
         return (p.mdeg_to_deg(self.trk.az_error_mdeg),
                 p.mdeg_to_deg(self.trk.el_error_mdeg))
-
-    # True when the direction asked for was outside an axis's travel, so the
-    # Pico is holding at the limit and doing the best it can. Worked out by
-    # the loop from the fix and the limits it read when it armed - see
-    # TrackingLoop._is_clamped. Worth showing: it means the rocket is out of
-    # reach, rather than the error failing to close for some other reason.
-    clamped: bool = False
 
     def describe(self) -> str:
         """One line fit to print while a flight is running."""
@@ -131,7 +132,7 @@ class TrackingLoop:
         self._last: Sample | None = None
         self._sent = 0
 
-        # Read once when arming, and only used to notice a clamped target.
+        # Read just before arming, and only used to notice a clamped target.
         # Asked for rather than assumed, like everything else that comes
         # from the Pico; None if it could not be read, and then clamping
         # simply goes unreported rather than being guessed at.
@@ -170,12 +171,14 @@ class TrackingLoop:
         Pico's idea of where it is becomes trustworthy again - see the note
         in targets.py.
         """
-        trk = self.session.track(True)
-        self._trk = trk
+        # The limits first: once tracking is armed the Pico counts as busy
+        # and refuses every question but TRACK.
         try:
             self._lim = self.session.limits()
         except sn.SessionError:
             self._lim = None
+        trk = self.session.track(True)
+        self._trk = trk
         if isinstance(self.source, tg.DeltaSource):
             self.source.anchor(p.mdeg_to_deg(trk.az_pos_mdeg),
                                p.mdeg_to_deg(trk.el_pos_mdeg))
@@ -201,8 +204,8 @@ class TrackingLoop:
         Worked out from the fix and the travel limits, not from what the Pico
         echoed back. Two reasons that is the right side to look at: the echo
         is always a round trip behind the fix, so comparing them flags every
-        sample of a moving target; and an antenna legitimately resting at 0
-        degrees is sitting on a travel limit, so looking for a target at a
+        sample of a moving target; and an antenna can legitimately be asked
+        to point exactly at a travel limit, so looking for a target at a
         limit flags that too. Asking "did I just request something out of
         range" has neither problem, and the laptop already knows.
         """
@@ -279,8 +282,8 @@ def run(session: sn.Session, source: tg.TargetSource, *,
             if sample is not None and on_sample is not None:
                 on_sample(sample)
             # A short sleep rather than a spin: the Pico is doing the work,
-            # and a tenth of the send period keeps the cadence honest without
-            # pinning a core.
+            # and a quarter of the send period (50 ms at most) keeps the
+            # cadence honest without pinning a core.
             sleep(min(0.05, loop.period / 4.0))
     except KeyboardInterrupt:
         pass

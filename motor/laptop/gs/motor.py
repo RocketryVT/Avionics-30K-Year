@@ -86,8 +86,9 @@ HELP_TEXT = """\
   Ctrl-C during a move stops the motor, then waits for its report.
   'gear on' means the belt is fitted and angles are at the antenna;
   'gear off' means each axis on its own, angles at the gearbox shaft.
-  Targets come from 'py -m gs.track', not from here. 'track on' only arms
-  it; with nothing sending targets the Pico gives up after a second or so."""
+  To track, close this prompt and run 'py -m gs.track' (or use the window):
+  it arms tracking and sends the targets. 'track on' here only arms it, and
+  with nothing sending targets the Pico gives up after a second or so."""
 
 
 class UsageError(Exception):
@@ -101,6 +102,20 @@ def _axis(word: str, allow_all: bool = False) -> str:
         names = " or ".join(a.lower() for a in allowed)
         raise UsageError(f"axis must be {names}")
     return name
+
+
+def _on_off(args: list[str], usage: str) -> bool | None:
+    """The one optional on/off word `gear` and `track` take. None if absent."""
+    if not args:
+        return None
+    if len(args) != 1:
+        raise UsageError(usage)
+    word = args[0].strip().lower()
+    if word in ("on", "yes", "true", "1"):
+        return True
+    if word in ("off", "no", "false", "0"):
+        return False
+    raise UsageError(usage)
 
 
 def _looks_like_a_number(word: str) -> bool:
@@ -339,19 +354,10 @@ class Console:
 
     def do_gear(self, args: list[str]) -> None:
         """Report or change which gearing the Pico counts."""
-        if not args:
+        wanted = _on_off(args, "gear [on|off]")
+        if wanted is None:
             self.report_gear(self.session.gear())
             return
-        if len(args) != 1:
-            raise UsageError("gear [on|off]")
-
-        word = args[0].strip().lower()
-        if word in ("on", "yes", "true", "1"):
-            wanted = True
-        elif word in ("off", "no", "false", "0"):
-            wanted = False
-        else:
-            raise UsageError("gear [on|off]")
 
         # Asked first so we can say whether anything actually changed. The
         # Pico treats setting the mode already in force as a no-op, zero
@@ -372,19 +378,10 @@ class Console:
 
     def do_track(self, args: list[str]) -> None:
         """Arm or disarm chasing a target, or just report."""
-        if not args:
+        wanted = _on_off(args, "track [on|off]")
+        if wanted is None:
             self.report_track(self.session.track())
             return
-        if len(args) != 1:
-            raise UsageError("track [on|off]")
-
-        word = args[0].strip().lower()
-        if word in ("on", "yes", "true", "1"):
-            wanted = True
-        elif word in ("off", "no", "false", "0"):
-            wanted = False
-        else:
-            raise UsageError("track [on|off]")
 
         trk = self.session.track(wanted)
         self.report_track(trk)
@@ -395,7 +392,10 @@ class Console:
                 "  armed. Nothing will move until targets arrive, and the "
                 "Pico gives up if they stop."
             )
-            self.say("  send them with: py -m gs.track --sim")
+            self.say(
+                "  to send them, close this prompt and run: "
+                "py -m gs.track --sim"
+            )
 
     def report_track(self, trk: p.Trk) -> None:
         self.say(f"  tracking {'ARMED' if trk.armed else 'off'}")

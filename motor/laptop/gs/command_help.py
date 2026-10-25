@@ -5,11 +5,10 @@ somebody who already knows the machine. This is the longer form the window
 shows: what it does, and - the part that is actually hard to work out from a
 list - *when* to use it.
 
-Kept as data rather than prose so it can be checked. `missing()` compares it
-against the prompt's real command table, and a test fails if a command is
-added without a line here. That is the same instinct as the window rendering
-`HELP_TEXT`: a reference that can drift from the thing it describes is worse
-than none.
+Kept as data rather than prose so it can be checked. `missing()` and
+`extra()` compare it against the prompt's real command table - run them after
+adding a command, and both should come back empty. A reference that can drift
+from the thing it describes is worse than none.
 """
 
 from __future__ import annotations
@@ -89,7 +88,7 @@ ENTRIES = [
     Entry(
         command="stop",
         usage="stop",
-        what="Slows to a halt. Keeps the zero.",
+        what="Slows to a halt. Keeps the zero. Also ends tracking.",
         when="A move is heading somewhere you did not intend and there is "
              "time. This is the one to reach for first.",
     ),
@@ -119,10 +118,11 @@ ENTRIES = [
         usage="track [on|off]",
         what="Arms or disarms chasing a target. Arming moves nothing on its "
              "own.",
-        when="Before starting 'py -m gs.track', which supplies the targets. "
-             "If none arrive the Pico gives up after about a second and a "
-             "half, which is deliberate - it is what a radio dropout looks "
-             "like.",
+        when="Rarely by hand: the window's mode 3 and 'py -m gs.track' arm "
+             "it themselves. Useful for checking arming works, and for "
+             "watching the safety stop - with no targets arriving the Pico "
+             "gives up after about a second and a half, which is what a "
+             "radio dropout looks like.",
     ),
 
     # --- tuning ------------------------------------------------------------
@@ -270,9 +270,8 @@ def text() -> str:
 def missing(commands) -> list[str]:
     """Which of `commands` have no entry here.
 
-    Point it at `motor.Console.COMMANDS`. A test asserts this is empty, so a
-    command cannot be added to the prompt without a line saying when to use
-    it.
+    Point it at `motor.Console.COMMANDS`. It should come back empty: every
+    command the prompt has deserves a line saying when to use it.
     """
     covered = {e.command for e in ENTRIES} | set(ALIASES)
     return sorted(name for name in commands if name not in covered)

@@ -284,8 +284,7 @@ class MotorWorker(threading.Thread):
     def shutdown(self) -> None:
         """Close the port and finish the thread. Safe to call twice.
 
-        Named apart from `stop`, which stops a motor. The two were briefly
-        the same name and the lifecycle one lost, so the thread never exited.
+        Named apart from `stop`, which stops a motor.
         """
         self._stopping.set()
 
@@ -409,7 +408,9 @@ class MotorWorker(threading.Thread):
             # Pico is alive while nothing is being asked of it.
             self._state = replace(self._state, heartbeat_at=self._clock())
         text = getattr(record, "text", None)
-        self._emit(EVENT_LINE, ("<", text if text is not None else _record_text(record)))
+        if text is None:
+            text = _record_text(record)
+        self._emit(EVENT_LINE, ("<", text))
 
     def _close(self) -> None:
         self._console = None
@@ -473,18 +474,20 @@ class MotorWorker(threading.Thread):
             self._estop_req.clear()
             return False
 
+        # The stop goes out first, and only then is the tracking loop let
+        # go: disarming costs a round trip, and a stop should not wait.
         if self._estop_req.is_set():
             self._estop_req.clear()
             self._stop_req.clear()
-            self._stop_tracking("stopped")
             session.estop()
+            self._stop_tracking("stopped")
             self._emit(EVENT_NOTE,
                        "emergency stop sent - re-zero before moving again")
             return True
         if self._stop_req.is_set():
             self._stop_req.clear()
-            self._stop_tracking("stopped")
             session.stop()
+            self._stop_tracking("stopped")
             self._emit(EVENT_NOTE,
                        "stop sent - waiting for it to come to rest")
             return True

@@ -99,9 +99,9 @@ uint32_t interval_us(const Move &move, uint32_t i);
 // ============================================================================
 // Chasing a target that keeps moving
 // ============================================================================
-// Everything above plans a whole move up front and then follows it: steps_num
-// decides how far, interval_us answers "how long until step i" from the plan
-// and the step number alone. That is exact and easy to check, and it is also
+// Everything above plans a whole move up front and then follows it:
+// plan_move decides how far, interval_us answers "how long until step i" from
+// the plan and the step number alone. That is exact and easy to check, and it is also
 // why a target that changes has nowhere to go - there is no longer a plan to
 // be part way through.
 //

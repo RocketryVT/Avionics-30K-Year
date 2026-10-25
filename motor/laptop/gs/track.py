@@ -11,8 +11,9 @@ can be rehearsed, logged and argued about without one, and so the whole chain
 can be exercised over a serial port with nothing bolted to the motors.
 
 **It arms tracking, which means the motors move on their own.** The axes must
-be zeroed first - do that at the `motor>` prompt - and the Pico refuses
-otherwise. Ctrl-C disarms and the Pico's watchdog covers anything worse.
+be zeroed first - do that at the `motor>` prompt, then close the prompt, since
+only one program can have the port open - and the Pico refuses otherwise.
+Ctrl-C disarms and the Pico's watchdog covers anything worse.
 """
 
 from __future__ import annotations
@@ -21,8 +22,6 @@ import argparse
 import sys
 
 from gs import flight_log
-from gs import ports
-from gs import protocol as p
 from gs import session as sn
 from gs import targets as tg
 from gs import tracking
@@ -48,8 +47,8 @@ def build_parser() -> argparse.ArgumentParser:
                         help=f"targets per second (default "
                              f"{tracking.DEFAULT_HZ:g})")
     parser.add_argument("--seconds", type=float,
-                       help="stop after this long. Default: the whole flight "
-                            "for --sim and --replay, forever for --manual")
+                        help="stop after this long. Default: the whole flight "
+                             "for --sim and --replay, forever for --manual")
     parser.add_argument("--log", nargs="?", const="", metavar="FILE",
                         help="write a flight log. No name for a dated one in "
                              "logs/")

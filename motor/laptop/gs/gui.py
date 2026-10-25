@@ -21,20 +21,19 @@ The three modes
 ---------------
 
 The firmware knows nothing about "mode 2". It knows two separate things -
-which gearing it is counting, and (later) whether it is tracking - and the
-modes here are those composed into the three ways this machine actually gets
-used:
+which gearing it is counting, and whether it is tracking - and the modes here
+are those composed into the three ways this machine actually gets used:
 
     1 independent   gear off   each motor on its own, one axis at a time,
                                angles at the gearbox output shaft
-
-Each move panel offers both: "turn by" reads the box as a change, the way the
-prompt's `move` always has, and "go to" reads the same number as a
-destination. The subtraction for "go to" happens on the Pico, which is the
-only place that knows where the axis really is.
     2 combined      gear on    both motors through the belt, both axes in
                                one command, angles at the antenna
     3 track         gear on    a target stream the firmware chases
+
+The move panels for modes 1 and 2 each have two buttons for one box: "turn
+by" reads the number as a change, the way the prompt's `move` does, and "go
+to" reads it as a destination. The subtraction for "go to" happens on the
+Pico, which is the only place that knows where the axis really is.
 
 Mode 3 is the one where the motors move without anybody pressing anything,
 so arming it is a separate click from entering it.
@@ -48,8 +47,8 @@ Typing commands
 
 The commands panel lists what each command does *and when you would reach
 for it* - the part that is hard to work out from a list. It comes from
-`command_help.py`, which a test holds against the prompt's real command
-table, so it cannot drift and no command can be added without a line.
+`command_help.py`, which can be checked against the prompt's real command
+table so the two do not drift apart.
 
 Under it is a box to type them in. It runs the line through the prompt's own
 handling (`_GuiConsole` in gui_worker.py), so a command means the same thing
@@ -82,6 +81,7 @@ Four rules it holds to
 from __future__ import annotations
 
 import argparse
+import queue
 import sys
 import time
 import tkinter as tk
@@ -94,7 +94,6 @@ from gs import gui_worker as gw
 from gs import motor
 from gs import protocol as p
 from gs import results_file
-from gs import tracking
 
 # How often the Tk thread looks for events from the worker. Well under the
 # worker's own poll interval, so a fresh reading is shown as soon as it
@@ -162,7 +161,8 @@ class App:
         self.clock = clock
         self._state = gw.State()
 
-        # Swapped out in tests, which must not open a modal nobody can click.
+        # Every "are you sure?" goes through this, so the window can be
+        # driven by a script without a modal nobody can click.
         self.confirm = messagebox.askokcancel
 
         # What was last written into each settings box, so an edit can be
@@ -449,10 +449,8 @@ class App:
         commands.rowconfigure(0, weight=1)
         commands.columnconfigure(0, weight=1)
 
-        # From command_help.py, which a test holds against the prompt's real
-        # command table - so this panel cannot drift away from the commands
-        # that exist, and no command can be added without a line saying when
-        # to reach for it.
+        # From command_help.py, which can be checked against the prompt's
+        # real command table, so this panel lists the commands that exist.
         text = tk.Text(commands, height=12, width=52, font=self.mono,
                        wrap="word", state="normal")
         text.insert("1.0", command_help.text())
@@ -612,10 +610,12 @@ class App:
             return
 
         kind = self.m3_source.get()
+        following = ("the direction you typed" if kind == "manual"
+                     else "a simulated flight")
         if not self.confirm(
             "Arm tracking?",
             f"The motors will start moving on their own, following "
-            f"{'the direction you typed' if kind == 'manual' else 'a simulated flight'}"
+            f"{following}"
             f" at {hz:g} targets a second.\n\n"
             "STOP and E-STOP stay live. The Pico also gives up by itself if "
             "targets stop reaching it.",
@@ -759,8 +759,8 @@ class App:
                     self._move_began(*payload)
                 elif kind == gw.EVENT_DONE:
                     self._move_ended(*payload)
-        except Exception:
-            pass  # queue.Empty, or the window is going away
+        except queue.Empty:
+            pass  # everything the worker said has been shown
 
         # These two tick on even when no event arrives, which is exactly when
         # they matter: a Pico that stopped talking, and a move in progress.
@@ -776,12 +776,13 @@ class App:
         if not narrate:
             return
         for plan in plans:
+            short = ("  (too short to reach that speed)" if plan.triangular
+                     else "")
             self.note(
                 f"plan {plan.axis.lower()} {plan.steps:+d} steps  "
                 f"{p.format_mdeg(plan.from_mdeg)} -> "
                 f"{p.format_mdeg(plan.to_mdeg)} deg at "
-                f"{p.format_mdeg(plan.speed_mdps)} deg/s"
-                f"{'  (too short to reach that speed)' if plan.triangular else ''}"
+                f"{p.format_mdeg(plan.speed_mdps)} deg/s{short}"
             )
 
     def _move_ended(self, outcomes, narrate: bool = True) -> None:
@@ -891,15 +892,12 @@ class App:
     def _show_settings(self, st: gw.State) -> None:
         for axis in ("az", "el"):
             if st.cfg is not None:
-                self._fill(self.e_accel[axis],
-                           p.format_mdeg(getattr(st.cfg, f"{axis}_accel_mdps2")))
-                self._fill(self.e_min[axis],
-                           p.format_mdeg(getattr(st.cfg, f"{axis}_min_mdeg")))
-                self._fill(self.e_max[axis],
-                           p.format_mdeg(getattr(st.cfg, f"{axis}_max_mdeg")))
-                self._fill(
-                    self.e_dead[axis],
-                    p.format_mdeg(getattr(st.cfg, f"{axis}_deadband_mdeg")))
+                for boxes, name in ((self.e_accel, "accel_mdps2"),
+                                    (self.e_min, "min_mdeg"),
+                                    (self.e_max, "max_mdeg"),
+                                    (self.e_dead, "deadband_mdeg")):
+                    value = getattr(st.cfg, f"{axis}_{name}")
+                    self._fill(boxes[axis], p.format_mdeg(value))
             speed = "-"
             if st.lim is not None:
                 speed = (f"{p.format_mdeg(st.lim.speed_min_mdps)}"

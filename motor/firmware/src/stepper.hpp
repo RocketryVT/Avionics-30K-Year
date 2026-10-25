@@ -92,7 +92,15 @@ public:
     // we can claim to know.
     void estop();
 
+    // True during a planned move. Not while chasing: a tracking axis has
+    // no DONE to report.
     bool moving() const { return mode_ == Mode::Planned; }
+
+    // True whenever the axis may be turning: a planned move, tracking
+    // armed, or still slowing down after tracking was switched off. While
+    // it is true, every command but the stops, TRACK and TARGET is refused.
+    bool busy() const { return mode_ != Mode::Idle; }
+
     bool aborted() const { return aborted_; }
 
     // Non-zero from the start of a move until its DONE has been sent, so the

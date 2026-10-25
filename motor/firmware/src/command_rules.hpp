@@ -39,8 +39,10 @@
 
 // What the firmware knows about itself at the moment a command arrives.
 struct MachineState {
-    // True while either axis is turning. One axis moving blocks commands for
-    // both - except TARGET and TRACK, which exist to be sent while it is.
+    // True while either axis is moving, or while tracking is armed (or
+    // still slowing down after it was switched off). One busy axis blocks
+    // commands for both - except STOP, ESTOP, TARGET and TRACK, which exist
+    // to be sent while it is.
     bool busy = false;
 
     // True once TRACK ON has been accepted. A TARGET does nothing until it

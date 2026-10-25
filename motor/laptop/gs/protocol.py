@@ -105,13 +105,14 @@ GPIO_MAX = 29
 MOVE_AXES = ("AZ", "EL")
 ZERO_AXES = ("AZ", "EL", "ALL")
 
-# The two words GEAR takes and reports. ON means the final gear pair is in
-# the maths; see the module docstring.
-GEAR_ON = "ON"
-GEAR_OFF = "OFF"
+# The two words GEAR and TRACK take and report. For GEAR, ON means the final
+# gear pair is in the maths; for TRACK, that tracking is armed.
+ON = "ON"
+OFF = "OFF"
 
-# What SET can change: acceleration in deg/sec/sec, and the travel limits in
-# degrees. Both cross the wire in thousandths, like every other number.
+# What SET can change: acceleration in deg/sec/sec, the travel limits and the
+# deadband in degrees. All cross the wire in thousandths, like every other
+# number.
 SETTING_NAMES = ("ACCEL", "MIN", "MAX", "DEADBAND")
 
 # Every axis word the firmware can put in a reply, including the two that
@@ -403,7 +404,7 @@ def track(cmd_id: int, on: bool | None = None) -> str:
     _check_id(cmd_id)
     if on is None:
         return f"TRACK,{cmd_id}"
-    return f"TRACK,{cmd_id},{GEAR_ON if on else GEAR_OFF}"
+    return f"TRACK,{cmd_id},{ON if on else OFF}"
 
 
 def target(cmd_id: int, az_deg: float, el_deg: float) -> str:
@@ -437,7 +438,7 @@ def gear(cmd_id: int, on: bool | None = None) -> str:
     _check_id(cmd_id)
     if on is None:
         return f"GEAR,{cmd_id}"
-    return f"GEAR,{cmd_id},{GEAR_ON if on else GEAR_OFF}"
+    return f"GEAR,{cmd_id},{ON if on else OFF}"
 
 
 def encode(line: str) -> bytes:
@@ -911,7 +912,7 @@ def parse_reply(line: str) -> Reply:
         if name == "TRK" and len(f) == 9:
             return Trk(
                 id=_int(f[1]),
-                armed=_word(f[2], GEAR_ON, GEAR_OFF),
+                armed=_word(f[2], ON, OFF),
                 az_target_mdeg=_int(f[3]),
                 az_pos_mdeg=_int(f[4]),
                 az_mdps=_int(f[5]),
@@ -923,7 +924,7 @@ def parse_reply(line: str) -> Reply:
         if name == "GEAR" and len(f) == 7:
             return Gear(
                 id=_int(f[1]),
-                geared=_word(f[2], GEAR_ON, GEAR_OFF),
+                geared=_word(f[2], ON, OFF),
                 az_steps_num=_int(f[3]),
                 az_steps_den=_int(f[4]),
                 el_steps_num=_int(f[5]),

@@ -32,9 +32,9 @@
 // all, ever. The TRK stream goes out through send_if_room(), which asks the
 // USB layer whether a whole line will fit and drops the line if it will not.
 // It never waits. A dropped telemetry line costs a moment of staleness on
-// screen; a wait would cost a stalled step loop, which is worse. Only TRK is
-// sent this way - everything else still goes out at a moment when nothing is
-// turning.
+// screen; a wait would cost a stalled step loop, which is worse. Only the
+// tracking reports are sent this way - everything else still goes out at a
+// moment when nothing is turning.
 //
 // Deliberately absent:
 //   no ENA, no ALM     not wired on this board; the Pico cannot disable a
@@ -258,7 +258,7 @@ static void print_banner(LoadResult loaded)
 static MachineState snapshot()
 {
     MachineState s;
-    s.busy         = g_az.moving() || g_el.moving();
+    s.busy         = g_az.busy() || g_el.busy();
     s.az_zeroed    = g_az.zeroed();
     s.el_zeroed    = g_el.zeroed();
     s.az_pos_steps = g_az.pos_steps();
@@ -372,7 +372,8 @@ static void apply(const Decision &d)
         g_az_spec = d.az_spec;
         g_el_spec = d.el_spec;
         // A degree means something different now, so any target in hand is
-        // meaningless and the zeros are gone. Tracking stops with them.
+        // meaningless and the zeros are gone. A gear change is refused while
+        // tracking, so this is only a backstop.
         g_tracking = false;
         g_az.disarm_chase();
         g_el.disarm_chase();
@@ -526,14 +527,18 @@ int main()
             g_tracking = false;
             g_az.disarm_chase();
             g_el.disarm_chase();
-            send(format_trk(g_out, sizeof(g_out), 0, track_report()));
-            printf("[motor] no target for %lu ms - tracking stopped\n",
-                   static_cast<unsigned long>(TRACK_TIMEOUT_MS));
+            // The axes are still slowing down, so these go out the same
+            // never-wait way as the stream. The laptop may well be gone -
+            // that is usually why the targets stopped.
+            send_if_room(format_trk(g_out, sizeof(g_out), 0, track_report()));
+            send_if_room(static_cast<size_t>(snprintf(
+                g_out, sizeof(g_out),
+                "[motor] no target for %lu ms - tracking stopped\n",
+                static_cast<unsigned long>(TRACK_TIMEOUT_MS))));
         }
 
-        // The tracking stream. The one report that goes out while an axis is
-        // turning, and the only one sent through send_if_room() - see the
-        // rule at the top of this file.
+        // The tracking stream. Sent through send_if_room() because an axis
+        // is turning - see the rule at the top of this file.
         if (g_tracking && absolute_time_diff_us(now, next_track_report) <= 0) {
             next_track_report = delayed_by_ms(now, TRACK_REPORT_MS);
             send_if_room(format_trk(g_out, sizeof(g_out), 0, track_report()));

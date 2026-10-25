@@ -301,11 +301,11 @@ constexpr AxisSpec AZ_SPEC = {
     9,       // steps_den     -> 44.444 steps per degree
     -180000, // min_mdeg      -180 degrees
     180000,  // max_mdeg      +180 degrees
-    true,    // invert_dir    flipped at the bench, 25 Oct 2026: `move az 45
-             //               10` went the wrong way. At the time the driver
-             //               turned one way for every command, + or -, so
-             //               confirm with `move az 5 10` / `move az 5 -10`
-             //               once it reverses.
+    true,    // invert_dir    NOT YET CONFIRMED. Set while the azimuth
+             //               driver was turning one way for every command,
+             //               + or -, which is a wiring or driver fault this
+             //               setting cannot fix. Once it reverses, check
+             //               with `move az 5 10` then `move az 5 -10`.
     V_START_MDPS,
     135000,  // accel_mdps2   135 deg/sec/sec (aiming for 180)
     ACCEL_MIN_MDPS2,
@@ -359,7 +359,7 @@ constexpr AxisSpec EL_SPEC = {
 // degree. The scaled numbers are 3.500 deg/s start, 94.500 deg/s/s and a
 // 126.700 deg/s ceiling.
 //
-// THE 0..180 TRAVEL HAS NOT BEEN MEASURED ON THE ASSEMBLED ANTENNA. It is
+// THE -25..180 TRAVEL HAS NOT BEEN MEASURED ON THE ASSEMBLED ANTENNA. It is
 // what the mechanism was described as swinging; it is also the only thing
 // between a mistyped command and a hard stop, since there are no limit
 // switches. Check it before the first geared move, and narrow it at the
@@ -372,7 +372,7 @@ constexpr AxisSpec EL_SPEC_GEARED =
                     //             -10, so check the mount clears -25 first
            180000,  // max_mdeg    180 degrees of antenna
            false);  // invert_dir  same as direct, because a belt does not
-           //             reverse rotation. Not yet seen with the
+                    //             reverse rotation. Not yet seen with the
                     //             belt on - confirm on the first geared move
 
 // ============================================================================

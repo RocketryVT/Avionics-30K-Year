@@ -18,7 +18,7 @@ py -m gs.motor  --- text commands -->  gs_motor  --- step + dir -->  CL57TE x2
 | `firmware/src/` | The program that runs on the Pico (C++) |
 | `firmware/uf2/` | The built program, ready to copy onto the Pico (made by the build, not kept in git) |
 | `laptop/gs/` | The program you run on the laptop (Python) |
-| `docs/` | Setting up a new machine, what has changed, and the motor driver's manual |
+| `docs/` | Setting up a new machine, and the motor driver's manual |
 | `logs/` | Results files written by `--log` (not kept in git) |
 
 ### The Pico program, `firmware/src/`
@@ -159,8 +159,8 @@ back in it. A Pico with nothing saved comes up in direct mode. The mode is
 printed in the startup banner, by `gear`, and by `settings`.
 
 Before the first geared move, check `motor_config.hpp`: nobody has counted
-azimuth's 32 teeth on this machine, and elevation's 0-180 travel has not been
-measured on the assembled antenna. Those two numbers are the only thing
+azimuth's 32 teeth on this machine, and elevation's -25 to 180 travel has not
+been measured on the assembled antenna. Those two numbers are the only thing
 between a mistyped command and a hard stop.
 
 ### Tracking
@@ -201,6 +201,14 @@ Three things about it are worth knowing before you arm it:
   for any speed at all. Nothing against a ~50° beam, but it grows with the
   square of the rate.
 
+**Zero azimuth facing north.** Directions arrive as compass bearings, 0 to
+360. The Pico's azimuth runs -180 to +180 with no wrap-around, so the laptop
+sends a bearing past 180 as a negative angle - 270 goes out as -90. That only
+points the right way if azimuth's zero faces north. It also makes due south
+the seam: a rocket drifting across south goes from +179.9 to -179.9, and the
+antenna turns a full circle the other way to follow it, because it will never
+wind past ±180.
+
 While tracking, the Pico sends a `TRK` line a few times a second with the
 target, the position and the rate for each axis. It is the only report that
 comes out while an axis is turning - `pos` is refused then, and the heartbeat
@@ -208,14 +216,17 @@ stops - and it is sent only if there is room in the USB buffer, never waited
 on. A dropped telemetry line costs a moment of staleness; waiting would cost
 a stalled step loop.
 
-`stop`, `estop` and a gear change all end tracking. A gear change has to:
-a degree means something different afterwards, so any target in hand is
-meaningless.
+`stop` and `estop` end tracking. While it is armed, every other command
+except `track` is refused as busy - `track off` first, then zero, move or
+change gear.
 
 #### Sending the targets
 
-`track on` only arms it. Something has to supply directions, and
-`py -m gs.track` is that something:
+Something has to supply directions. In the window that is mode 3; from a
+terminal it is `py -m gs.track`, which arms tracking itself, sends the
+targets, and disarms when it finishes. Close the `motor>` prompt first - only
+one program can have the port open. (`track on` at the prompt only arms it,
+which is mostly useful for seeing the 1.5 second give-up happen.)
 
 | | |
 | --- | --- |

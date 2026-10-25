@@ -172,9 +172,10 @@ Decision do_move(const Command &c, const MachineState &s, bool absolute)
     return d;
 }
 
-// While an axis is turning, only the two stop commands are acted on. They are
-// answered by the DONE that follows rather than by an ACK, so that nothing is
-// printed between the first pulse and the last.
+// While an axis is busy, only the two stop commands are acted on. They get
+// no ACK, so that nothing is printed between the first pulse and the last.
+// A planned move answers with its DONE; tracking just stops, and the TRK
+// stream stops with it.
 Decision do_while_moving(const Command &c)
 {
     Decision d;

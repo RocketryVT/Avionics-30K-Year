@@ -483,7 +483,8 @@ class Session:
 
         No reply is waited for. While an axis is turning the Pico answers a
         stop with the move's own DONE and nothing else, because it prints
-        nothing between two pulses - so wait for that with await_done.
+        nothing between two pulses - so wait for that with await_done. While
+        tracking, a stop disarms it, and the TRK stream stops.
         """
         self._send(p.stop(self.ids.next()))
 
