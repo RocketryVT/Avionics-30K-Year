@@ -36,8 +36,8 @@ only place that knows where the axis really is.
                                one command, angles at the antenna
     3 track         gear on    a target stream the firmware chases
 
-Mode 3 is not built yet, so its button is disabled rather than absent - the
-shape of the thing should be visible from the start.
+Mode 3 is the one where the motors move without anybody pressing anything,
+so arming it is a separate click from entering it.
 
 Choosing a mode changes the gearing, **which costs both axes their zero**,
 so it asks first. Modes 2 and 3 are both `gear on`, so moving between them
@@ -69,9 +69,11 @@ from tkinter import font as tkfont
 from tkinter import messagebox
 from tkinter import ttk
 
+from gs import command_help
 from gs import gui_worker as gw
 from gs import motor
 from gs import protocol as p
+from gs import tracking
 
 # How often the Tk thread looks for events from the worker. Well under the
 # worker's own poll interval, so a fresh reading is shown as soon as it
@@ -99,7 +101,8 @@ MODE_NOTE = {
                       "angles at the gearbox output shaft",
     MODE_COMBINED: "both motors through the belt - final pairs counted, "
                    "angles at the antenna",
-    MODE_TRACK: "not built yet - the firmware cannot chase a target so far",
+    MODE_TRACK: "the Pico chases a target that keeps moving - pick a "
+                "source, then arm it",
 }
 
 PAD = {"padx": 6, "pady": 3}
@@ -214,7 +217,6 @@ class App:
                                      command=self._mode_chosen)
             button.grid(row=0, column=col, sticky="w", **PAD)
             self.r_mode[value] = button
-        self.r_mode[MODE_TRACK].state(["disabled"])
 
         self.v_gear = ttk.Label(frame, text="-", font=self.bold)
         self.v_gear.grid(row=1, column=0, columnspan=3, sticky="w", **PAD)
@@ -329,10 +331,58 @@ class App:
                                       command=lambda: self._move_both(True))
         self.b_goto_both.grid(row=0, column=7, rowspan=2, padx=2)
 
-        # --- mode 3: a placeholder that says so ---
+        # --- mode 3: a target stream the Pico chases ---
         track = ttk.Frame(holder)
         self.panels[MODE_TRACK] = track
-        ttk.Label(track, text="tracking is not built yet").grid(**PAD)
+
+        picker = ttk.Frame(track)
+        picker.grid(row=0, column=0, columnspan=4, sticky="w")
+        self.m3_source = tk.StringVar(value="manual")
+        for col, (value, text) in enumerate((
+            ("manual", "a direction I type"),
+            ("sim", "a simulated flight"),
+        )):
+            ttk.Radiobutton(picker, text=text, value=value,
+                            variable=self.m3_source,
+                            command=self._source_chosen).grid(
+                row=0, column=col, sticky="w", **PAD)
+        ttk.Label(picker, text="at").grid(row=0, column=2, padx=(12, 2))
+        self.m3_hz = self._entry(picker, 0, 3, "5", width=5)
+        ttk.Label(picker, text="targets/sec").grid(row=0, column=4, padx=2)
+
+        aim = ttk.Frame(track)
+        aim.grid(row=1, column=0, columnspan=4, sticky="w")
+        ttk.Label(aim, text="point at  az").grid(row=0, column=0, **PAD)
+        self.m3_az = self._entry(aim, 0, 1, "0")
+        ttk.Label(aim, text="el").grid(row=0, column=2, padx=2)
+        self.m3_el = self._entry(aim, 0, 3, "45")
+        ttk.Label(aim, text="deg").grid(row=0, column=4, padx=2)
+        self.b_point = ttk.Button(aim, text="point here", width=11,
+                                  command=self._point)
+        self.b_point.grid(row=0, column=5, padx=(12, 2))
+
+        arm = ttk.Frame(track)
+        arm.grid(row=2, column=0, columnspan=4, sticky="w")
+        self.b_arm = ttk.Button(arm, text="ARM tracking", width=14,
+                                command=self._arm)
+        self.b_arm.grid(row=0, column=0, **PAD)
+        self.b_disarm = ttk.Button(arm, text="disarm", width=10,
+                                   command=self._disarm)
+        self.b_disarm.grid(row=0, column=1, **PAD)
+        self.v_arm_note = self._value(arm, 0, 2, "")
+
+        # The readout. Three numbers per axis, because the interesting thing
+        # while tracking is not where it is but how far behind it is.
+        board = ttk.Frame(track)
+        board.grid(row=3, column=0, columnspan=4, sticky="w", pady=(4, 0))
+        for col, head in enumerate(("", "target", "actual", "off by",
+                                    "turning at")):
+            self._value(board, 0, col, head, font=self.bold)
+        self.v_trk = {}
+        for line, axis in ((1, "az"), (2, "el")):
+            self._value(board, line, 0, axis, font=self.bold)
+            self.v_trk[axis] = [self._value(board, line, col)
+                                for col in (1, 2, 3, 4)]
 
         self.progress = ttk.Progressbar(holder, mode="determinate",
                                         maximum=1000)
@@ -357,16 +407,19 @@ class App:
         self.log.tag_configure("in", foreground="#222")
         self.log.tag_configure("note", foreground="#06c")
 
-        commands = ttk.LabelFrame(self.root, text="commands (at the prompt)")
+        commands = ttk.LabelFrame(self.root,
+                                  text="commands, and when to use them")
         commands.grid(row=row, column=1, sticky="nsew", **PAD)
         commands.rowconfigure(0, weight=1)
         commands.columnconfigure(0, weight=1)
 
-        # Rendered from motor.py's own help, so this panel cannot drift away
-        # from the commands that actually exist.
-        text = tk.Text(commands, height=12, width=46, font=self.mono,
-                       wrap="none", state="normal")
-        text.insert("1.0", motor.HELP_TEXT)
+        # From command_help.py, which a test holds against the prompt's real
+        # command table - so this panel cannot drift away from the commands
+        # that exist, and no command can be added without a line saying when
+        # to reach for it.
+        text = tk.Text(commands, height=12, width=52, font=self.mono,
+                       wrap="word", state="normal")
+        text.insert("1.0", command_help.text())
         text.configure(state="disabled")
         text.grid(row=0, column=0, sticky="nsew")
         cbar = ttk.Scrollbar(commands, orient="vertical", command=text.yview)
@@ -446,6 +499,82 @@ class App:
             return
         self.worker.move_both(*values["az"], *values["el"],
                               absolute=absolute)
+
+    # --- mode 3 ------------------------------------------------------------
+
+    def _source_chosen(self) -> None:
+        # Changing the source mid-flight would mean two of them fighting, so
+        # it only takes effect next time tracking is armed.
+        if self._state.tracking:
+            self.note("the source changes next time you arm")
+        self._refresh_enabled(self._state)
+
+    def _arm(self) -> None:
+        try:
+            hz = self._read(self.m3_hz, "targets/sec")
+            az = self._read(self.m3_az, "azimuth")
+            el = self._read(self.m3_el, "elevation")
+        except motor.UsageError as exc:
+            self.note(str(exc))
+            return
+        if hz <= 0:
+            self.note("targets/sec must be more than zero")
+            return
+
+        kind = self.m3_source.get()
+        if not self.confirm(
+            "Arm tracking?",
+            f"The motors will start moving on their own, following "
+            f"{'the direction you typed' if kind == 'manual' else 'a simulated flight'}"
+            f" at {hz:g} targets a second.\n\n"
+            "STOP and E-STOP stay live. The Pico also gives up by itself if "
+            "targets stop reaching it.",
+        ):
+            return
+        self.worker.start_tracking(kind, hz, az, el)
+
+    def _disarm(self) -> None:
+        self.worker.stop_tracking()
+
+    def _point(self) -> None:
+        try:
+            az = self._read(self.m3_az, "azimuth")
+            el = self._read(self.m3_el, "elevation")
+        except motor.UsageError as exc:
+            self.note(str(exc))
+            return
+        self.worker.point_at(az, el)
+
+    def _show_tracking(self, st: gw.State) -> None:
+        sample = st.sample
+        if not st.tracking and sample is None:
+            self.v_arm_note.configure(text="not armed - nothing will move")
+            for cells in self.v_trk.values():
+                for cell in cells:
+                    cell.configure(text="-")
+            return
+
+        trk = getattr(sample, "trk", None)
+        if trk is None:
+            self.v_arm_note.configure(text="armed, waiting for a report")
+            return
+
+        for axis, cells in self.v_trk.items():
+            target = getattr(trk, f"{axis}_target_mdeg")
+            actual = getattr(trk, f"{axis}_pos_mdeg")
+            error = getattr(trk, f"{axis}_error_mdeg")
+            rate = getattr(trk, f"{axis}_mdps")
+            for cell, value, unit in zip(cells,
+                                         (target, actual, error, rate),
+                                         ("deg", "deg", "deg", "deg/s")):
+                cell.configure(text=f"{p.format_mdeg(value):>10} {unit}")
+
+        note = f"{st.targets_sent} targets sent"
+        if getattr(sample, "clamped", False):
+            # Said plainly, because the error will not close and the reason
+            # is not the antenna's fault.
+            note += "   OUT OF REACH - held at a travel limit"
+        self.v_arm_note.configure(text=note)
 
     def _apply_settings(self) -> None:
         """Send only what differs from what the Pico reports.
@@ -653,6 +782,7 @@ class App:
                 foreground="#0a5" if st.pos.zeroed else "#c00")
 
         self._show_settings(st)
+        self._show_tracking(st)
         self._refresh_enabled(st)
 
         status = st.describe()
@@ -734,9 +864,26 @@ class App:
                        self.b_goto_one, self.b_goto_both):
             widget.state(["!disabled"] if can_move else ["disabled"])
 
-        for value, button in self.r_mode.items():
-            allowed = settled and value != MODE_TRACK
-            button.state(["!disabled"] if allowed else ["disabled"])
+        # No switching modes mid-flight: `settled` is false while tracking,
+        # which is what stops it.
+        for button in self.r_mode.values():
+            button.state(["!disabled"] if settled else ["disabled"])
+
+        # Arming needs a zero and a settled machine; disarming must always be
+        # available, like the stops.
+        self.b_arm.state(["!disabled"] if can_move and not st.tracking
+                         else ["disabled"])
+        self.b_disarm.state(["!disabled"] if st.tracking else ["disabled"])
+        # The direction boxes stay editable whenever the source is manual,
+        # armed or not: you type where to point and THEN arm. (A disabled
+        # ttk.Entry refuses even a programmatic write, so getting this the
+        # wrong way round locks the operator out of their own target.)
+        manual = self.m3_source.get() == "manual"
+        for widget in (self.m3_az, self.m3_el):
+            widget.state(["!disabled"] if manual else ["disabled"])
+        # Sending one, though, needs something armed to send it to.
+        self.b_point.state(["!disabled"] if manual and st.tracking
+                           else ["disabled"])
 
         self.b_reconnect.state(
             ["disabled"] if (st.working or st.moving) else ["!disabled"])

@@ -1,0 +1,287 @@
+WHAT CHANGED
+============
+
+Plain list of everything done on the tracking-and-gui branch, in the order
+it was done. Nothing here is pushed.
+
+
+1. THE GEAR SWITCH  (commit 7dd2fa9)
+------------------------------------
+
+- Before: both motors were counted as having only a 10:1 gearbox, so every
+  angle was measured at the gearbox shaft and each motor had to be tested on
+  its own.
+- Now there is a switch. "gear off" counts the gearbox only. "gear on" also
+  counts the belt's final gear pairs, so angles are measured at the antenna.
+- Azimuth's pair is 32:14, elevation's is 20:14. Both come from last year's
+  ground station firmware.
+- Steps per degree: 44.444 with the gear off. With it on, 101.587 on azimuth
+  and 63.492 on elevation.
+- Speeds and accelerations are scaled down when the gear is on, so the motor
+  is asked for exactly the same thing in both modes. Without that, a fast
+  move in geared mode would ask the motor for about 690 rpm, past where its
+  torque halves, and a stalled stepper loses position silently.
+- Switching costs both axes their zero, because the drive train has
+  physically changed. You have to zero again.
+- The setting is saved in the Pico's flash, so a restart comes back in the
+  same mode instead of quietly reverting.
+- Results files gained a "gear" column, because an angle means nothing
+  without knowing which gearing produced it.
+- Still unchecked on this machine: nobody has counted azimuth's 32 teeth,
+  and elevation's 0-180 travel has not been measured on the assembled
+  antenna. Both are one-line edits in motor_config.hpp.
+
+
+2. A WINDOW THAT WATCHES  (commit 4bb62ad)
+------------------------------------------
+
+- New: "py -m gs.gui" opens a window showing what the Pico is doing.
+- Shows: which port and which build, how long it has been up, the heartbeat,
+  the gearing and what it makes a degree worth, position in degrees and in
+  steps, a large red NOT ZEROED warning, the travel and speed limits, and
+  every line going to and from the Pico.
+- Read-only at this stage. It could not command anything.
+- Split into two files on purpose. gui_worker.py talks to the Pico on its own
+  thread; gui.py only draws. Without that split the window would freeze for
+  up to a minute every time a move ran.
+- Nothing on screen is remembered. Every number shown is what the Pico last
+  said, so the window can never disagree with the machine.
+- Found and fixed a bug in the existing code: if the USB cable was pulled
+  while a command was being sent, the error came out as a type nothing was
+  prepared for, and the text prompt would have crashed with a traceback
+  instead of printing a message. This fixes the prompt too, not just the
+  window.
+
+
+3. MODES 1 AND 2 IN THE WINDOW  (commit 90fd696)
+------------------------------------------------
+
+- The window can now drive the machine. No firmware change was needed - this
+  uses commands that already existed.
+- Three modes, picked with radio buttons:
+    1. independent - gear off, one axis at a time
+    2. combined    - gear on, both axes in one command
+    3. track       - added later, in step 7
+- Picking a mode sets the gearing for you. Because that costs both axes their
+  zero, it asks first and puts the button back if you say no.
+- Controls added: zero (both or one axis), a move per mode, acceleration and
+  travel editable per axis with apply/save/defaults, and STOP and E-STOP
+  across the bottom. Escape is the ramped stop - the key that is easy to hit
+  by accident is the one that does not lose the zero.
+- Stop does not wait its turn. A move holds the connection for as long as it
+  runs, so a queued stop would arrive after the move it was meant to cut
+  short. It now reaches a running move within a fifth of a second.
+- Closing the window while an axis is turning stops it.
+- Everything except the two stops is disabled while a command is running, and
+  a move is disabled until the axes are zeroed.
+- Apply only sends the settings that actually changed.
+- Three bugs the tests caught:
+    - Two different methods were both called "stop", so the one meant to shut
+      the worker thread down was silently replaced and the thread never
+      exited.
+    - A bad number typed into a box killed the background thread, leaving a
+      window that had quietly stopped updating.
+    - Two places had to be kept in step by hand to know the current state.
+      Now there is one.
+- Settings boxes keep what you have half typed instead of losing it to the
+  next refresh.
+
+
+4. THE CHASE MATHS  (commit 99ac50b)
+------------------------------------
+
+- Arithmetic only. Nothing used it yet. Done on its own so the part most
+  likely to misbehave could be run thousands of times at a desk first.
+- The problem it solves: an ordinary move works out a whole speed plan up
+  front and follows it to the last step. If the target changes halfway
+  through there is nothing to update.
+- The new way carries its speed instead and asks one question over and over:
+  how far off am I, and how fast should I be going now?
+- Two things cap the answer. The axis's speed limit, and how fast it could
+  still brake from. The second is what matters - go faster than that and it
+  physically cannot stop in time, so it sails past, comes back, sails past
+  again, and hunts forever.
+- Those two hand over to each other automatically, so for a target that is
+  not moving this produces the same motion an ordinary move would, without
+  ever planning it.
+- Known and written down rather than fixed: it follows a moving target at a
+  steady distance behind, equal to the rate squared divided by twice the
+  acceleration. About 3.4 degrees at 20 deg/s on azimuth, 13.6 at 40 deg/s.
+  Nothing against an antenna beam about 50 degrees wide, but it grows with
+  the square of the rate.
+- New setting: the deadband, meaning how close to a target counts as being
+  there. Half a degree by default.
+
+
+5. "GOTO"  (commit ef767a6)
+---------------------------
+
+- "move" turns BY an amount and stays that way, because the bench procedure
+  is "+45, read the protractor, -45, read it again".
+- There was no way at all to say "point at 45". You had to read the position
+  and do the subtraction yourself.
+- New: "goto az 5 45" turns TO 45 degrees, wherever it started. Works for
+  both axes at once too. In the window, every move panel now has a "turn by"
+  button and a "go to" button against one angle box.
+- The subtraction happens on the Pico, because the step count is the only
+  record of where the axis is and it lives there. The laptop's copy can be up
+  to half a second old.
+- Rounding happens once. Twenty "goto"s in a row land on the nearest step to
+  where you asked, not twenty roundings away from it.
+- Asking "goto" for the angle it is already at is refused.
+
+
+6. THE PICO CAN CHASE A TARGET  (commit fcf9b06)
+------------------------------------------------
+
+- The biggest firmware change. The chase maths from step 4 is now wired up,
+  so the motor can be told "point here" over and over and will keep closing
+  the gap by itself.
+- New commands: "track on" / "track off" to arm and disarm, and TARGET to say
+  where to point. TARGET is sent by a program, not typed.
+- A TARGET does nothing unless tracking is armed, so a stray message cannot
+  move anything.
+- A target outside an axis's travel is held at the limit instead of refused.
+  This is deliberately different from how a move is treated. A move is a
+  finite thing somebody typed, so refusing it whole is right. A target
+  arrives several times a second from a rocket that does not know where the
+  gimbal can point - refusing would leave the antenna stuck with no way back,
+  while holding at the limit keeps it as close as it can get and picks the
+  rocket up again by itself.
+- A watchdog. If no target arrives for about a second and a half, both axes
+  ramp to rest and stay there. That is what a radio dropout or a closed
+  laptop looks like from the Pico's side, and it is what makes holding at a
+  limit safe rather than reckless.
+- Stop, emergency stop and a gear change all end tracking. The gear change
+  has to, because a degree means something different afterwards.
+- Telemetry that never waits. The firmware's rule was that nothing is printed
+  while a motor is turning, because writing to USB can block and that would
+  stall the motor part way round. Under tracking the motor is nearly always
+  turning, so that rule would mean no telemetry at all. It now asks whether
+  there is room for a whole line and drops the line if not. A dropped line
+  costs a moment of staleness; waiting would cost a stalled motor.
+- The deadband is now adjustable without reflashing - a command at the prompt
+  and a box in the window. Raise it if the motors chatter, lower it for
+  tighter pointing.
+- Could not be checked without hardware: whether that non-blocking write
+  really never blocks on a real Pico with a laptop that has stopped reading.
+  First thing to try at the bench.
+
+
+7. WHERE TARGETS COME FROM  (commit 60c8c96)
+--------------------------------------------
+
+- Laptop only. No firmware change.
+- Three sources, one interface:
+    manual     a direction you type. Takes the rocket, the radio and the
+               geometry out of the picture, so what is left under test is the
+               chase loop. Use this first on real hardware.
+    simulated  a rehearsal. Either a worked-out flight (straight up from a
+               pad 300 m away to about 30,000 ft, then down under a
+               parachute) or a recorded flight replayed from a file.
+    live       where the lat/lon/alt to az/el module plugs in when it is
+               ready. Hand it a function and it works.
+- New: "py -m gs.track --sim --dry-run" prints the angles a flight would ask
+  for, with no Pico and no motors, and reports the fastest elevation sweep in
+  it - about 30 degrees a second in the first two seconds, because close to
+  the pad a little altitude is a lot of angle. That is the number to compare
+  against an axis's speed limit.
+- The same command shows elevation reaching 87.6 degrees, which is almost
+  straight overhead. An az/el mount cannot track through directly overhead at
+  any gear ratio, so that is worth seeing in a rehearsal.
+- A flight log is written as it happens: one row per target sent, with the
+  direction asked for, the one the Pico is using, where it has got to, how
+  far off it is and how fast it is turning. The first two differ when a
+  target is out of reach, which one column would have hidden.
+- What your partner's module should hand over: absolute angles, not changes.
+  There is a fallback that adds up changes if it has to, and its notes say
+  why it is the worse option.
+- Two bugs the tests caught:
+    - A refused arm left a callback hooked to a dead loop forever, so the
+      text prompt's own output would have stayed broken after any failed
+      flight.
+    - Working out "is this target out of reach" took two wrong answers before
+      the obvious one. The laptop already knows what it asked for, so it just
+      checks that against the limits.
+
+
+8. MODE 3 IN THE WINDOW, AND BETTER HELP  (this commit)
+-------------------------------------------------------
+
+- The third mode is now in the window. Pick a source (a direction you type,
+  or a simulated flight), set how many targets a second, then ARM.
+- Arming is a separate click from choosing the mode, and it asks first,
+  because this is the only mode where the motors move without anybody
+  pressing anything.
+- While tracking it shows, for each axis: the target, where it actually is,
+  how far off it is, and how fast it is turning. Plus how many targets have
+  been sent.
+- If a target is out of reach it says so plainly, so a stubborn error reads as
+  "the rocket is outside what the mount can do" rather than a fault.
+- If the Pico's watchdog gives up on its own, the window follows it and says
+  what happened.
+- While tracking, the window stops asking its usual questions, because the
+  Pico refuses them all while a motor turns. The telemetry stream carries the
+  readings instead.
+- Disarm stays available at all times, as do STOP and E-STOP. Switching modes
+  is locked while tracking.
+- The commands panel is now the long form: for every command, what it does
+  AND when you would reach for it. That second part is the bit that is hard
+  to work out from a list.
+- A test holds that reference against the prompt's real command list, so it
+  cannot drift and no command can be added without a line saying when to use
+  it.
+- Found while testing: the direction boxes were disabled until tracking was
+  armed, which is backwards - you type where to point and then arm.
+
+
+HOW IT WAS CHECKED
+==================
+
+- The Pico firmware builds from scratch with no warnings, and produces a
+  .uf2 ready to flash.
+- 269 checks on the firmware maths, run on a PC rather than a Pico: steps per
+  degree in both gearings, the travel and speed limits, the saved-settings
+  record, absolute moves, and the chase loop driven thousands of times
+  against still targets, moving targets, targets it cannot catch, and a
+  stalled loop.
+- 428 checks on the laptop software, including the window built and driven
+  with no screen attached, and a pretend Pico standing in for the real one.
+- None of it has been run on the actual hardware. That is the next step.
+
+
+WHAT TO DO AT THE BENCH
+=======================
+
+In this order, because each step rules something out:
+
+1. Flash it. Check the startup text says the gearing and deadband you expect.
+2. Mode 1, gear off, one axis. Turn 45 degrees and check a protractor reads
+   45.000.
+3. Fit the belt. Mode 2, gear on. Check both axes again - if a move comes out
+   1.43 or 2.29 times too far, the gearing is the wrong way round.
+4. Mode 3 with a typed direction. Watch it slew and settle. Then change the
+   direction and watch it re-aim without stopping.
+5. Pull the USB cable mid-track and check the motors ramp down rather than
+   carrying on.
+6. Then a simulated flight.
+
+
+STILL OPEN
+==========
+
+- How often LoRa will deliver a position. This matters more than anything
+  else left. At one a second the antenna could fall up to 40 degrees behind
+  during the fast part of the climb, which is outside the beam. At five a
+  second it is about 8 degrees and fine.
+- Azimuth's 32 teeth have never been counted on this machine.
+- Elevation's 0-180 travel has not been measured on the assembled antenna.
+  Last year's system used -10 to +90, which is a much smaller range, and that
+  is probably the right one.
+- Whether elevation holds position under the antenna's weight. Last year used
+  a sensor to correct it; we have no feedback at all.
+- What to do near straight overhead, where an az/el mount cannot track. Most
+  systems freeze the azimuth above some elevation and accept the error.
+- The antenna's real beamwidth. The figure in last year's code is a
+  placeholder; from the antenna type it is probably 40-50 degrees, which is
+  forgiving.

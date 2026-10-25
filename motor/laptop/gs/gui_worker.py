@@ -8,6 +8,11 @@ nothing else is allowed to touch it:
     Tk thread  --- jobs --->  MotorWorker  --- commands --->  Pico
                <-- events ---              <--- replies ----
 
+While tracking it also drives a `tracking.TrackingLoop`, for the same reason
+it owns the session: the loop has to be ticked from the thread that holds the
+port. The window picks a source and a rate and says go; everything after that
+happens here.
+
 Both directions go through `queue.Queue`, which is the only thing shared.
 The worker never imports tkinter and never touches a widget; the window
 never touches the session. That split is what keeps the UI responsive, and
@@ -40,6 +45,8 @@ from dataclasses import dataclass, field, replace
 
 from gs import protocol as p
 from gs import session as sn
+from gs import targets as tg
+from gs import tracking
 
 # How often the worker asks the Pico what it looks like. Each poll is five
 # short commands and the Pico answers in microseconds, so this is nowhere
@@ -55,6 +62,14 @@ JOB_WAIT_S = 0.05
 # looks at the stop flags again. A move can run for a minute, and this is how
 # soon a stop reaches it.
 MOVE_SLICE_S = 0.2
+
+# How long the worker spends reading the port on each pass while tracking.
+#
+# Needed because nothing else reads it then: the usual poll is what drives
+# reading, and polling is pointless while tracking (every question is refused
+# as busy). Without this the TRK stream would pile up unread in the OS
+# buffer and the window would show nothing.
+TRACK_READ_S = 0.02
 
 
 @dataclass(frozen=True)
@@ -82,6 +97,16 @@ class State:
     # either.
     working: bool = False
 
+    # --- tracking ---------------------------------------------------------
+    # True from the moment tracking is armed until it is disarmed, by the
+    # operator or by the Pico's own watchdog. While it is true the readings
+    # above go stale, because every question is refused as busy - `sample`
+    # is what the window shows instead.
+    tracking: bool = False
+    source_name: str = ""
+    targets_sent: int = 0
+    sample: object | None = None  # a tracking.Sample
+
     pos: p.Pos | None = None
     gear: p.Gear | None = None
     cfg: p.Cfg | None = None
@@ -104,6 +129,9 @@ class State:
             return f"not connected{': ' + self.error if self.error else ''}"
         if self.rebooted:
             return "the Pico restarted - re-zero before moving"
+        if self.tracking:
+            where = f" from {self.source_name}" if self.source_name else ""
+            return (f"TRACKING{where} - {self.targets_sent} targets sent")
         if self.moving:
             return "moving"
         if self.working:
@@ -165,6 +193,12 @@ class MotorWorker(threading.Thread):
         self._session: sn.Session | None = None
         self._state = State(port=port or "")
 
+        # The tracking loop, when there is one. It lives here rather than in
+        # the window for the same reason the session does: it has to be
+        # driven from the thread that owns the port.
+        self._loop: tracking.TrackingLoop | None = None
+        self._source: tg.TargetSource | None = None
+
     # --- the UI thread's side ----------------------------------------------
 
     def shutdown(self) -> None:
@@ -216,6 +250,25 @@ class MotorWorker(threading.Thread):
     def defaults(self) -> None:
         self._jobs.put(_Job("defaults"))
 
+    # --- tracking ----------------------------------------------------------
+
+    def start_tracking(self, kind: str, hz: float, az_deg: float = 0.0,
+                       el_deg: float = 0.0) -> None:
+        """Arm tracking and start sending targets.
+
+        `kind` is "manual" or "sim". The source is built here, on the
+        worker's thread, because that is the only thread allowed to touch it
+        afterwards.
+        """
+        self._jobs.put(_Job("track_start", (kind, hz, az_deg, el_deg)))
+
+    def stop_tracking(self) -> None:
+        self._jobs.put(_Job("track_stop"))
+
+    def point_at(self, az_deg: float, el_deg: float) -> None:
+        """Move a manual source's target. Ignored by any other source."""
+        self._jobs.put(_Job("track_point", (az_deg, el_deg)))
+
     # --- the worker's side -------------------------------------------------
 
     def _emit(self, kind: str, payload) -> None:
@@ -250,6 +303,8 @@ class MotorWorker(threading.Thread):
             self._emit(EVENT_NOTE, f"while reading the banner: {exc}")
 
     def _note_record(self, record: p.Reply) -> None:
+        if self._loop is not None:
+            self._loop.note(record)
         if isinstance(record, p.Mstat):
             # Tracked separately: a heartbeat is how the window knows the
             # Pico is alive while nothing is being asked of it.
@@ -321,12 +376,14 @@ class MotorWorker(threading.Thread):
         if self._estop_req.is_set():
             self._estop_req.clear()
             self._stop_req.clear()
+            self._stop_tracking("stopped")
             session.estop()
             self._emit(EVENT_NOTE,
                        "emergency stop sent - re-zero before moving again")
             return True
         if self._stop_req.is_set():
             self._stop_req.clear()
+            self._stop_tracking("stopped")
             session.stop()
             self._emit(EVENT_NOTE,
                        "stop sent - waiting for it to come to rest")
@@ -406,6 +463,15 @@ class MotorWorker(threading.Thread):
         elif job.name == "defaults":
             session.defaults()
             self._emit(EVENT_NOTE, "back to the built-in settings")
+        elif job.name == "track_start":
+            self._start_tracking(session, *job.args)
+        elif job.name == "track_stop":
+            self._stop_tracking("disarmed")
+        elif job.name == "track_point":
+            if isinstance(self._source, tg.ManualSource):
+                self._source.point(*job.args)
+                self._emit(EVENT_NOTE,
+                           "pointing at az %.3f el %.3f" % job.args)
 
     def _handle_job(self, job: _Job) -> None:
         """Run one job, reporting what it ran into rather than dying.
@@ -436,6 +502,85 @@ class MotorWorker(threading.Thread):
         finally:
             self._set_state(working=False)
 
+    def _start_tracking(self, session, kind, hz, az_deg, el_deg) -> None:
+        self._stop_tracking(None)
+
+        if kind == "manual":
+            source = tg.ManualSource(az_deg, el_deg, clock=self._clock)
+        elif kind == "sim":
+            source = tg.SimSource.rocket(hz=hz)
+        else:
+            self._emit(EVENT_NOTE, f"no source called {kind!r}")
+            return
+
+        loop = tracking.TrackingLoop(session, source, hz=hz,
+                                     clock=self._clock)
+        # Arming can be refused - an axis not zeroed - and _handle_job turns
+        # that into a note. Only keep the loop if it went through.
+        loop.arm()
+        self._source = source
+        self._loop = loop
+        self._set_state(tracking=True, source_name=source.name,
+                        targets_sent=0, sample=None)
+        self._emit(EVENT_NOTE,
+                   f"tracking armed from {source.name} at {hz:g} Hz")
+
+    def _stop_tracking(self, why: str | None) -> None:
+        """Disarm and let the loop go. Safe when there is nothing running."""
+        if self._loop is None:
+            self._source = None
+            return
+        self._loop.disarm()
+        self._loop = None
+        self._source = None
+        self._set_state(tracking=False, sample=None)
+        if why:
+            self._emit(EVENT_NOTE, f"tracking {why}")
+
+    def _tracking_pass(self) -> None:
+        """One turn of the tracking loop: read the port, then send if due.
+
+        Reading first, because nothing else is reading while tracking - the
+        usual poll is skipped, every question being refused as busy - and the
+        TRK stream is the only thing reporting where the axes are.
+        """
+        session = self._session
+        loop = self._loop
+        if session is None or loop is None:
+            return
+
+        try:
+            session.drain_until_quiet(quiet_s=TRACK_READ_S,
+                                      max_s=TRACK_READ_S * 2)
+            sample = loop.tick()
+        except sn.SessionError as exc:
+            self._emit(EVENT_NOTE, f"tracking stopped: {exc}")
+            if "lost the connection" in str(exc):
+                self._close()
+                self._set_state(connected=False, error=str(exc))
+            self._loop = None
+            self._source = None
+            self._set_state(tracking=False, sample=None)
+            return
+
+        if sample is None:
+            return
+
+        # The Pico gives up on its own if targets stop arriving, and says so
+        # in the stream. Following it rather than arguing keeps the window
+        # showing what the machine is actually doing.
+        if sample.trk is not None and not sample.trk.armed:
+            self._loop = None
+            self._source = None
+            self._set_state(tracking=False, sample=sample)
+            self._emit(EVENT_NOTE,
+                       "the Pico stopped tracking - no targets reached it, "
+                       "or something stopped it")
+            return
+
+        self._set_state(sample=sample, targets_sent=loop.sent,
+                        tracking=True)
+
     def run(self) -> None:
         self._connect(self._port)
         next_poll = self._clock()
@@ -459,11 +604,20 @@ class MotorWorker(threading.Thread):
                         self._handle_job(job)
                     next_poll = self._clock()
 
+                # While tracking, the loop replaces the poll: every
+                # question would be refused as busy, and the TRK stream
+                # carries the readings instead.
+                if self._loop is not None:
+                    self._tracking_pass()
+                    next_poll = self._clock()
+                    continue
+
                 now = self._clock()
                 if self._session is not None and now >= next_poll:
                     next_poll = now + POLL_INTERVAL_S
                     self._poll()
         finally:
+            self._stop_tracking(None)
             self._close()
 
 

@@ -18,7 +18,7 @@ py -m gs.motor  --- text commands -->  gs_motor  --- step + dir -->  CL57TE x2
 | `firmware/src/` | The program that runs on the Pico (C++) |
 | `firmware/uf2/` | The built program, ready to copy onto the Pico (made by the build, not kept in git) |
 | `laptop/gs/` | The program you run on the laptop (Python) |
-| `docs/` | Setting up a new machine, and the motor driver's manual |
+| `docs/` | Setting up a new machine, what has changed, and the motor driver's manual |
 | `logs/` | Results files written by `--log` (not kept in git) |
 
 ### The Pico program, `firmware/src/`
@@ -48,6 +48,7 @@ py -m gs.motor  --- text commands -->  gs_motor  --- step + dir -->  CL57TE x2
 | `scripted_runs.py` | The `sweep` and `random` runs |
 | `results_file.py` | The CSV results file |
 | `targets.py` | Where a pointing direction comes from: typed, simulated, or live |
+| `command_help.py` | What each command does, and when to reach for it |
 | `tracking.py` | The loop that keeps sending targets |
 | `track.py` | `py -m gs.track`: rehearse or run a flight |
 | `flight_log.py` | The time-series CSV a tracking run writes |
