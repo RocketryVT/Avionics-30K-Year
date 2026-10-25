@@ -71,6 +71,7 @@ HELP_TEXT = """\
   save                             keep the settings after a restart
   defaults                         back to the numbers in motor_config.hpp
   gear [on|off]                    count the final gear pair, or not
+  track [on|off]                   arm or disarm chasing a target
   sweep [angle=45] [speeds=1,5,90] [pause]   one angle at each speed
   random [count=10] [speed=5] [seed=N] [pause]   angles within the limits
   true [row] <degrees>             what the protractor really reads
@@ -84,7 +85,9 @@ HELP_TEXT = """\
   'goto' is absolute: 'goto az 5 45' points at 45, wherever it started.
   Ctrl-C during a move stops the motor, then waits for its report.
   'gear on' means the belt is fitted and angles are at the antenna;
-  'gear off' means each axis on its own, angles at the gearbox shaft."""
+  'gear off' means each axis on its own, angles at the gearbox shaft.
+  Targets come from 'py -m gs.track', not from here. 'track on' only arms
+  it; with nothing sending targets the Pico gives up after a second or so."""
 
 
 class UsageError(Exception):
@@ -208,6 +211,17 @@ class Console:
                     f"       heartbeat  az {p.format_mdeg(record.az_mdeg)}  "
                     f"el {p.format_mdeg(record.el_mdeg)}  "
                     f"up {record.uptime_s} s"
+                )
+        elif isinstance(record, p.Trk):
+            # The tracking stream. Hidden like the heartbeat unless asked
+            # for: at a few lines a second it would scroll everything else
+            # away, and `py -m gs.track` is where it is meant to be watched.
+            if self.verbose:
+                self.say(
+                    f"       tracking   az {p.format_mdeg(record.az_pos_mdeg)}"
+                    f" of {p.format_mdeg(record.az_target_mdeg)}"
+                    f"   el {p.format_mdeg(record.el_pos_mdeg)}"
+                    f" of {p.format_mdeg(record.el_target_mdeg)}"
                 )
         elif isinstance(record, p.Info) and record.text:
             mark = "  ??" if record.malformed else "    "
@@ -355,6 +369,46 @@ class Console:
         )
         self.say("  send zero before the next move.")
         self.show_settings()
+
+    def do_track(self, args: list[str]) -> None:
+        """Arm or disarm chasing a target, or just report."""
+        if not args:
+            self.report_track(self.session.track())
+            return
+        if len(args) != 1:
+            raise UsageError("track [on|off]")
+
+        word = args[0].strip().lower()
+        if word in ("on", "yes", "true", "1"):
+            wanted = True
+        elif word in ("off", "no", "false", "0"):
+            wanted = False
+        else:
+            raise UsageError("track [on|off]")
+
+        trk = self.session.track(wanted)
+        self.report_track(trk)
+        if trk.armed:
+            # Worth saying, because arming on its own looks like nothing
+            # happened - and then the watchdog quietly undoes it.
+            self.say(
+                "  armed. Nothing will move until targets arrive, and the "
+                "Pico gives up if they stop."
+            )
+            self.say("  send them with: py -m gs.track --sim")
+
+    def report_track(self, trk: p.Trk) -> None:
+        self.say(f"  tracking {'ARMED' if trk.armed else 'off'}")
+        self.say(
+            f"         az target {p.format_mdeg(trk.az_target_mdeg)}"
+            f"  at {p.format_mdeg(trk.az_pos_mdeg)}"
+            f"  off by {p.format_mdeg(trk.az_error_mdeg)} deg"
+        )
+        self.say(
+            f"         el target {p.format_mdeg(trk.el_target_mdeg)}"
+            f"  at {p.format_mdeg(trk.el_pos_mdeg)}"
+            f"  off by {p.format_mdeg(trk.el_error_mdeg)} deg"
+        )
 
     def report_gear(self, gear: p.Gear) -> None:
         # Every results row is marked with the mode it was taken in, so
@@ -779,6 +833,7 @@ class Console:
         "save": do_save,
         "defaults": do_defaults,
         "gear": do_gear,
+        "track": do_track,
         "sweep": do_sweep,
         "random": do_random,
         "true": do_true,

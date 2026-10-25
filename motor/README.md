@@ -47,6 +47,11 @@ py -m gs.motor  --- text commands -->  gs_motor  --- step + dir -->  CL57TE x2
 | `ports.py` | Finds the Pico's serial port |
 | `scripted_runs.py` | The `sweep` and `random` runs |
 | `results_file.py` | The CSV results file |
+| `targets.py` | Where a pointing direction comes from: typed, simulated, or live |
+| `tracking.py` | The loop that keeps sending targets |
+| `track.py` | `py -m gs.track`: rehearse or run a flight |
+| `flight_log.py` | The time-series CSV a tracking run writes |
+| `gui.py`, `gui_worker.py` | The window, and the thread that talks to the Pico for it |
 
 ## Quick start
 
@@ -206,6 +211,40 @@ a stalled step loop.
 a degree means something different afterwards, so any target in hand is
 meaningless.
 
+#### Sending the targets
+
+`track on` only arms it. Something has to supply directions, and
+`py -m gs.track` is that something:
+
+| | |
+| --- | --- |
+| `py -m gs.track --sim` | A synthetic flight: 30,000 ft from 300 m downrange |
+| `py -m gs.track --sim --dry-run` | The angles only. No port, no motors |
+| `py -m gs.track --sim --log` | ...writing a flight log to `logs/` |
+| `py -m gs.track --replay f.csv` | A recorded flight again |
+| `py -m gs.track --manual 45 60` | Hold one direction and watch it settle |
+
+Start with `--dry-run`. It prints what the source would ask for and the
+fastest elevation sweep in it, which with the defaults is about 30°/s in the
+first couple of seconds — close to the pad means a little altitude is a lot
+of angle. That is the number to compare against an axis's ceiling before
+anything is bolted up.
+
+`--manual` is the one to use first on real hardware: it takes the rocket, the
+radio and the geometry out of the picture, so what is left under test is the
+chase loop.
+
+Three sources, one interface, in `targets.py`. The third is `LiveSource`,
+which is where the lat/lon/alt-to-az/el module plugs in when it is ready —
+hand it a callable returning `(az_deg, el_deg, fix_time)` and it works. It
+wants **absolute** angles, not changes; `DeltaSource` is there if that cannot
+be arranged, and its docstring says why it is the worse option.
+
+A flight log is a time series rather than a table — one row per target sent,
+appended as it happens. It records the direction asked for *and* the one the
+Pico is using, which differ when a target is out of reach and gets held at a
+travel limit.
+
 ### In a terminal (Windows, from this folder)
 
 | Command | What it does |
@@ -217,6 +256,8 @@ meaningless.
 | `py -m gs.motor --verbose` | ...showing the heartbeat |
 | `py -m gs.motor -c "pos"` | Run one prompt command and exit. Repeat `-c` for more |
 | `py -m gs.motor --list` | List serial ports, marking the Pico, and exit |
+| `py -m gs.gui` | The window: all of the above, with the state on screen |
+| `py -m gs.track --sim` | Send a stream of pointing targets. See **Tracking** |
 
 ### In WSL (from this folder)
 
