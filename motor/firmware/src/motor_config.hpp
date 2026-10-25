@@ -324,7 +324,8 @@ constexpr AxisSpec EL_SPEC = {
     9,       // steps_den     -> 44.444 steps per degree
     0,       // min_mdeg      0 degrees
     360000,  // max_mdeg      360 degrees of the gearbox shaft
-    false,   // invert_dir    unverified - expect this one to need flipping
+    true,    // invert_dir    verified at the bench 25 Oct 2026: `move el
+             //               45 180` turned 180 the wrong way with false
     V_START_MDPS,
     135000,  // accel_mdps2   135 deg/sec/sec
     ACCEL_MIN_MDPS2,
@@ -347,7 +348,9 @@ constexpr AxisSpec EL_SPEC_GEARED =
     geared(EL_SPEC, EL_PAIR,
            0,       // min_mdeg    0 degrees
            180000,  // max_mdeg    180 degrees of antenna
-           false);  // invert_dir  unverified - a belt does not reverse
+           true);   // invert_dir  same as direct, because a belt does not
+                    //             reverse rotation. Not yet seen with the
+                    //             belt on - confirm on the first geared move
 
 // ============================================================================
 // Looking an axis up by mode
