@@ -4,13 +4,17 @@
 // writing the flash itself is in settings_flash.cpp, which is kept to that
 // one job.
 //
-// Three numbers per axis can be set:
+// Four numbers per axis can be set:
 //
-//   ACCEL   acceleration     anywhere in the axis's accel_min..accel_max
-//   MIN     lower travel     no lower than motor_config.hpp's, no higher
+//   ACCEL     acceleration   anywhere in the axis's accel_min..accel_max
+//   MIN       lower travel   no lower than motor_config.hpp's, no higher
 //                            than the axis's current MAX
-//   MAX     upper travel     no higher than motor_config.hpp's, no lower
+//   MAX       upper travel   no higher than motor_config.hpp's, no lower
 //                            than the axis's current MIN
+//   DEADBAND  how close to a target counts as being there, 0 up to the
+//             axis's deadband_max. Only used when chasing a target, and
+//             meant to be tuned at the bench: raise it if the mechanism
+//             chatters, lower it for tighter pointing.
 //
 // So travel can only ever be narrowed at the prompt. There are no limit
 // switches on this machine and the limits are all that stands between a
@@ -68,9 +72,13 @@ bool same_settings(const AxisSpec &a, const AxisSpec &b);
 // The record kept in flash
 // ---------------------------------------------------------------------------
 
-// magic, version, gear mode, the six built-in numbers, the six settings, a
-// CRC.
-constexpr size_t SETTINGS_RECORD_LEN = 4 + 4 + 4 + 6 * 4 + 6 * 4 + 4;
+// How many of them there are, per axis. Both the record layout and the
+// loops over it come from this.
+constexpr size_t SETTING_COUNT = 4;
+
+// magic, version, gear mode, the built-in numbers, the settings, a CRC.
+constexpr size_t SETTINGS_RECORD_LEN =
+    4 + 4 + 4 + 2 * SETTING_COUNT * 4 + 2 * SETTING_COUNT * 4 + 4;
 
 // Write the record for this gear mode and these settings into out. Returns
 // the number of bytes written, or 0 if out is too small.

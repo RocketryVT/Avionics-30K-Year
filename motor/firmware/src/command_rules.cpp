@@ -380,6 +380,87 @@ Decision do_gear(const Command &c, const MachineState &s)
     return d;
 }
 
+// ---------------------------------------------------------------------------
+// TRACK and TARGET
+// ---------------------------------------------------------------------------
+
+TrackReport report_of(const MachineState &s)
+{
+    TrackReport r{};
+    r.armed          = s.tracking;
+    r.az_target_mdeg = steps_to_mdeg(s.az_spec, s.az_target_steps);
+    r.az_pos_mdeg    = steps_to_mdeg(s.az_spec, s.az_pos_steps);
+    r.az_mdps        = s.az_mdps;
+    r.el_target_mdeg = steps_to_mdeg(s.el_spec, s.el_target_steps);
+    r.el_pos_mdeg    = steps_to_mdeg(s.el_spec, s.el_pos_steps);
+    r.el_mdps        = s.el_mdps;
+    return r;
+}
+
+Decision do_track(const Command &c, const MachineState &s)
+{
+    const bool wanted = c.has_track ? c.track_on : s.tracking;
+
+    // Arming needs both axes zeroed, for the same reason a move does: the
+    // soft limits are measured from the zero, and without one they are no
+    // protection at all. Disarming is never refused - it is the way out.
+    if (wanted && !s.tracking && !(s.az_zeroed && s.el_zeroed)) {
+        return refuse(c, ErrCode::NoZero, "");
+    }
+
+    Decision d;
+    if (wanted != s.tracking) {
+        d.act      = Act::SetTrack;
+        d.track_on = wanted;
+    }
+
+    MachineState after = s;
+    after.tracking = wanted;
+    if (wanted && !s.tracking) {
+        // Arming starts the target where the axes are, so it never moves
+        // anything on its own.
+        after.az_target_steps = s.az_pos_steps;
+        after.el_target_steps = s.el_pos_steps;
+    }
+    say(d, format_trk(line_buf(d), MAX_REPLY_LEN, c.id, report_of(after)));
+    return d;
+}
+
+// Hold a target inside the axis's travel rather than refusing it.
+//
+// This is the one place the safety model works differently from a move. A
+// move is checked whole and refused whole, because it is a finite thing
+// somebody typed. A target arrives several times a second from a rocket that
+// does not know where the gimbal can point, and refusing one would just
+// leave the antenna chasing the last reachable one with no way to recover
+// when the rocket comes back into range. Clamping keeps it pointing as close
+// as it can and picks the truth up again by itself.
+int32_t clamp_target(const AxisSpec &spec, int32_t mdeg)
+{
+    if (mdeg < spec.min_mdeg) {
+        return spec.min_mdeg;
+    }
+    return (mdeg > spec.max_mdeg) ? spec.max_mdeg : mdeg;
+}
+
+Decision do_target(const Command &c, const MachineState &s)
+{
+    if (!s.tracking) {
+        return refuse(c, ErrCode::NotTracking, "");
+    }
+
+    Decision d;
+    d.act      = Act::SetTarget;
+    d.az_steps = mdeg_to_steps(s.az_spec, clamp_target(s.az_spec, c.az_mdeg));
+    d.el_steps = mdeg_to_steps(s.el_spec, clamp_target(s.el_spec, c.el_mdeg));
+
+    // Answered with nothing. It arrives several times a second, and the TRK
+    // stream already reports which target is in force; an ACK apiece would
+    // double the traffic and tell the laptop nothing it is not already
+    // being told.
+    return d;
+}
+
 // What a line the parser could not read is refused with.
 ErrCode err_for(ParseError e)
 {
@@ -402,7 +483,13 @@ Decision decide(const Command &c, const MachineState &s)
         return refuse(c, err_for(c.err), "");
     }
     if (s.busy) {
-        return do_while_moving(c);
+        // These two exist to be sent while an axis is turning - that is the
+        // whole point of them - so they do not go through the busy refusal.
+        switch (c.verb) {
+        case Verb::Target: return do_target(c, s);
+        case Verb::Track:  return do_track(c, s);
+        default:           return do_while_moving(c);
+        }
     }
 
     switch (c.verb) {
@@ -420,6 +507,8 @@ Decision decide(const Command &c, const MachineState &s)
     case Verb::Defaults: return do_defaults(c, s);
     case Verb::Settings: return do_settings(c, s);
     case Verb::Gear:     return do_gear(c, s);
+    case Verb::Track:    return do_track(c, s);
+    case Verb::Target:   return do_target(c, s);
     case Verb::None:     break;
     }
     return Decision{};

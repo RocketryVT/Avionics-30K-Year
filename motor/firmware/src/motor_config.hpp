@@ -154,6 +154,24 @@ constexpr int32_t DEADBAND_MDEG     = 500;   // 0.5 deg
 constexpr int32_t DEADBAND_MAX_MDEG = 5000;  // 5   deg
 
 // ----------------------------------------------------------------------------
+// How long tracking will go without hearing anything
+// ----------------------------------------------------------------------------
+// Targets arriving are the only sign the other end is still there. If they
+// stop - a radio dropout, a closed laptop, a pulled cable - the axes ramp to
+// rest and stay there until something arms tracking again.
+//
+// This is the guard that pays for clamping a target instead of refusing it.
+// A planned move is finite by construction: whatever happens to the laptop,
+// it ends. A target is not, so without a watchdog a dropout would leave the
+// antenna driving at an angle that was right minutes ago.
+//
+// It has to be comfortably longer than the gap between fixes, or an ordinary
+// quiet moment would look like a failure. 1.5 s suits anything from about
+// 1 Hz upwards. (Last year ignored IMU data older than 250 ms, which is the
+// same idea at a much higher data rate.)
+constexpr uint32_t TRACK_TIMEOUT_MS = 1500;
+
+// ----------------------------------------------------------------------------
 // Steps per degree
 // ----------------------------------------------------------------------------
 // Where 400/9 comes from, which is DIRECT mode:

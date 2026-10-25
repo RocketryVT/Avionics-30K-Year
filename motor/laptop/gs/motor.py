@@ -67,6 +67,7 @@ HELP_TEXT = """\
   settings                         acceleration and travel, and if saved
   set <az|el> accel <deg/s/s>      change the acceleration, for now
   set <az|el> <min|max> <degrees>  narrow the travel, for now
+  set <az|el> deadband <degrees>   how close to a target counts as there
   save                             keep the settings after a restart
   defaults                         back to the numbers in motor_config.hpp
   gear [on|off]                    count the final gear pair, or not
@@ -297,11 +298,16 @@ class Console:
         axis = _axis(args[0])
         name = args[1].strip().upper()
         if name not in p.SETTING_NAMES:
-            raise UsageError("setting must be accel, min or max")
+            allowed = ", ".join(n.lower() for n in p.SETTING_NAMES)
+            raise UsageError(f"setting must be {allowed}")
         value = _number(args[2], name.lower())
 
         self.session.set_setting(axis, name, value)
         unit = "deg/s/s" if name == "ACCEL" else "deg"
+        # DEADBAND only bites while tracking, which is worth saying so nobody
+        # wonders why a move ignored it.
+        if name == "DEADBAND":
+            unit = "deg (used when tracking)"
         self.say(
             f"  {axis.lower()} {name.lower()} set to "
             f"{p.format_mdeg(p.deg_to_mdeg(value))} {unit}"
@@ -369,13 +375,16 @@ class Console:
             f"  gear {'on' if cfg.geared else 'off'} - angles at the "
             f"{'antenna' if cfg.geared else 'gearbox output shaft'}"
         )
-        for name, accel, low, high in (
-            ("az", cfg.az_accel_mdps2, cfg.az_min_mdeg, cfg.az_max_mdeg),
-            ("el", cfg.el_accel_mdps2, cfg.el_min_mdeg, cfg.el_max_mdeg),
+        for name, accel, low, high, dead in (
+            ("az", cfg.az_accel_mdps2, cfg.az_min_mdeg, cfg.az_max_mdeg,
+             cfg.az_deadband_mdeg),
+            ("el", cfg.el_accel_mdps2, cfg.el_min_mdeg, cfg.el_max_mdeg,
+             cfg.el_deadband_mdeg),
         ):
             self.say(
                 f"  {name}  accel {p.format_mdeg(accel)} deg/s/s"
                 f"   travel {p.format_mdeg(low)}..{p.format_mdeg(high)} deg"
+                f"   deadband {p.format_mdeg(dead)} deg"
             )
         if not cfg.saved:
             self.say(

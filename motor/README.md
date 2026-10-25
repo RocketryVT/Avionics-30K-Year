@@ -86,9 +86,11 @@ New machine? Do `docs/SETUP.md` first.
 | `settings` | Acceleration and travel for each axis, and whether they are saved |
 | `set <az\|el> accel <deg/s/s>` | Change an axis's acceleration (10-360). Lasts until a restart unless saved |
 | `set <az\|el> <min\|max> <deg>` | Narrow an axis's travel. It can't go past what `motor_config.hpp` allows |
+| `set <az\|el> deadband <deg>` | How close to a target counts as being there. Tracking only |
 | `save` | Keep the settings, so a restart comes back with them |
 | `defaults` | Back to the numbers in `motor_config.hpp` (then `save` to keep that) |
 | `gear [on\|off]` | Whether the final gear pair is counted. See **Gear modes** |
+| `track [on\|off]` | Arm or disarm chasing a target. See **Tracking** |
 | `pin <gpio> <0\|1>` | Hold a pin high or low, for a multimeter (GP4-7, GP12-15). A step pin (GP4, GP6) costs that axis its zero |
 | `sweep [axis=az] [angle=45] [speeds=1,5,90] [pause]` | One angle at each speed in turn |
 | `random [axis=az] [count=10] [speed=5] [seed=N] [pause]` | Random angles inside the limits |
@@ -154,6 +156,55 @@ Before the first geared move, check `motor_config.hpp`: nobody has counted
 azimuth's 32 teeth on this machine, and elevation's 0-180 travel has not been
 measured on the assembled antenna. Those two numbers are the only thing
 between a mistyped command and a hard stop.
+
+### Tracking
+
+Modes 1 and 2 above move the antenna by a command at a time. Tracking is the
+third way: the laptop keeps saying *point here*, and the Pico keeps closing
+the gap on its own.
+
+| | |
+| --- | --- |
+| `track on` | Arm it. Needs both axes zeroed, like any move |
+| `track off` | Disarm, ramping to a stop. Never refused |
+| `TARGET` | Where to point, absolute, both axes. Sent by the tracking program, not typed |
+
+**There is no plan and no end.** An ordinary move works out a whole trapezium
+up front and follows it to the last step, which is why a target that changes
+has nowhere to go. Tracking carries its speed instead, and once per loop asks
+one question: how far off am I, and how fast should I be going now? Two
+things cap the answer - the axis's speed ceiling, and how fast it could still
+brake from. A target that moves is not a special case, it is just the next
+answer.
+
+Three things about it are worth knowing before you arm it:
+
+- **A target outside the travel limits is held at the limit, not refused.**
+  A move is checked whole and refused whole, because it is a finite thing
+  somebody typed. A target arrives several times a second from a rocket that
+  does not know where the gimbal can point, so clamping keeps the antenna
+  pointing as close as it can and lets it pick the rocket up again by itself.
+
+- **If targets stop arriving, it gives up.** No target for 1.5 seconds and
+  both axes ramp to rest and stay there until something arms tracking again.
+  That is what a radio dropout or a closed laptop looks like from the Pico's
+  side, and it is what pays for clamping rather than refusing.
+
+- **It lags a moving target**, by `rate² / (2 × accel)`. About 3.4° at 20°/s
+  on azimuth, 13.6° at 40°/s. That is the braking cap needing an error to ask
+  for any speed at all. Nothing against a ~50° beam, but it grows with the
+  square of the rate.
+
+While tracking, the Pico sends a `TRK` line a few times a second with the
+target, the position and the rate for each axis. It is the only report that
+comes out while an axis is turning - `pos` is refused then, and the heartbeat
+stops - and it is sent only if there is room in the USB buffer, never waited
+on. A dropped telemetry line costs a moment of staleness; waiting would cost
+a stalled step loop.
+
+`stop`, `estop` and a gear change all end tracking. A gear change has to:
+a degree means something different afterwards, so any target in hand is
+meaningless.
 
 ### In a terminal (Windows, from this folder)
 

@@ -25,6 +25,8 @@
 //   DEFAULTS,<id>                                 back to the built-in ones
 //   SETTINGS,<id>                                 report the settings
 //   GEAR,<id>[,<ON|OFF>]                          report or change gear mode
+//   TRACK,<id>[,<ON|OFF>]                         report or arm tracking
+//   TARGET,<id>,<az_mdeg>,<el_mdeg>               point here (absolute)
 //
 // GEAR with no mode asks which one is in force. With ON or OFF it switches,
 // which changes what a degree means on both axes - see motor_config.hpp.
@@ -65,6 +67,8 @@ enum class Verb {
     Defaults,
     Settings,
     Gear,
+    Track,
+    Target,
 };
 
 enum class AxisId {
@@ -77,9 +81,10 @@ enum class AxisId {
 // What SET can change. See settings.hpp for the rules on each.
 enum class Setting {
     None,
-    Accel,  // acceleration, millidegrees per second per second
-    Min,    // lower travel limit, millidegrees
-    Max,    // upper travel limit, millidegrees
+    Accel,     // acceleration, millidegrees per second per second
+    Min,       // lower travel limit, millidegrees
+    Max,       // upper travel limit, millidegrees
+    Deadband,  // how close to a target counts as there, millidegrees
 };
 
 // Why a line could not be understood. These are faults in the text itself.
@@ -116,10 +121,18 @@ struct Command {
     uint8_t gpio    = 0;             // PIN
     uint8_t level   = 0;             // PIN
 
-    // GEAR: was a mode given, and which. Without one the command is a
-    // question rather than a change.
+    // GEAR and TRACK: was a mode given, and which. Without one the command
+    // is a question rather than a change.
     bool has_gear   = false;
     bool gear_on    = false;
+    bool has_track  = false;
+    bool track_on   = false;
+
+    // TARGET: where to point, absolute, both axes. Always both - tracking
+    // has no use for one axis on its own, and a pair of numbers is simpler
+    // than optional halves on a command that arrives several times a second.
+    int32_t az_mdeg = 0;
+    int32_t el_mdeg = 0;
 };
 
 // Read one line. On failure the returned command has err set and verb left as

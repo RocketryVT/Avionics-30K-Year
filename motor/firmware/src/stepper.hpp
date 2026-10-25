@@ -5,6 +5,12 @@
 // many steps, how long between them - is in motion_profile, so what is left
 // here is sending the pulses on time.
 //
+// An axis runs in one of two ways. A PLANNED move is finite: aim(), begin(),
+// and it walks a trapezium to its last step and reports. CHASING has no end -
+// it holds a target and keeps closing on it, re-deciding its speed every
+// tick, so a target that changes needs no replanning. The pulse-sending is
+// identical; only what decides the next interval differs.
+//
 // About the position count: it goes up or down by one for every pulse this
 // code sends out. It is what the firmware BELIEVES, not what the gimbal has
 // done. The driver's alarm line is not wired, so if a driver faults or the
@@ -50,8 +56,32 @@ public:
     void begin(const Move &m, uint16_t id);
 
     // Called as often as possible. Sends a pulse if one is due, otherwise
-    // returns straight away. Returns true while the move is still running.
+    // returns straight away.
+    //
+    // Returns true while pulses are being sent. An armed axis sitting inside
+    // its deadband returns false - it is still chasing, but nothing is
+    // turning, which is what the caller needs to know.
     bool tick(absolute_time_t now);
+
+    // --- chasing a target --------------------------------------------------
+
+    // Start chasing. The target begins at wherever the axis is, so arming
+    // alone never moves anything; it waits for a target.
+    void arm_chase();
+
+    // Stop chasing and come to rest, ramping down rather than cutting the
+    // pulses. The axis keeps its zero, so it can be armed again and carry on.
+    void disarm_chase();
+
+    // Where to point, in steps. Ignored unless armed.
+    void set_target_steps(int32_t steps);
+
+    bool chasing() const { return mode_ == Mode::Chasing; }
+    int32_t target_steps() const { return target_steps_; }
+
+    // What it is turning at, in millidegrees per second, signed. For
+    // telemetry; zero when at rest.
+    int32_t velocity_mdps() const;
 
     // Slow down and stop. The axis keeps stepping for as long as it takes to
     // come down from its current speed, so nothing is jerked to a halt.
@@ -62,7 +92,7 @@ public:
     // we can claim to know.
     void estop();
 
-    bool moving() const { return moving_; }
+    bool moving() const { return mode_ == Mode::Planned; }
     bool aborted() const { return aborted_; }
 
     // Non-zero from the start of a move until its DONE has been sent, so the
@@ -94,11 +124,25 @@ public:
     void clear_zero() { zeroed_ = false; }
 
 private:
+    enum class Mode {
+        Idle,
+        Planned,   // following a Move from plan_move, to its last step
+        Chasing,   // closing on target_steps_, with no end
+        Braking,   // was chasing, now ramping to a stop
+    };
+
     // Point the axis the right way and wait for the driver to notice.
     void set_direction(bool positive);
 
     // Send one pulse and count it.
     void step();
+
+    // One tick of the chase or brake loop. Shared, because braking is just
+    // chasing an error of zero.
+    bool chase_tick(absolute_time_t now, bool braking);
+
+    // Seconds since chase_tick last ran, for the velocity ramp.
+    float since_last_chase(absolute_time_t now);
 
     const AxisSpec &spec_;
     uint pin_pul_;
@@ -112,11 +156,19 @@ private:
     bool dir_positive_ = true;
 
     // --- the move in progress ---------------------------------------------
+    Mode mode_        = Mode::Idle;
     Move plan_        = {};
     uint32_t index_   = 0;  // how many pulses sent so far
-    bool moving_      = false;
     bool aborted_     = false;
     uint16_t move_id_ = 0;
+
+    // --- chasing ----------------------------------------------------------
+    // Velocity is STATE here, unlike a planned move where it is worked out
+    // from how far through the plan the axis is. That is the whole difference
+    // between the two: a target that changes has something to update.
+    int32_t target_steps_ = 0;
+    float v_sps_          = 0.0f;
+    absolute_time_t last_chase_ = {};
 
     absolute_time_t next_step_time_ = {};
     absolute_time_t first_pulse_    = {};

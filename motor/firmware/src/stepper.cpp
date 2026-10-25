@@ -60,7 +60,7 @@ void Stepper::begin(const Move &m, uint16_t id)
     index_   = 0;
     aborted_ = false;
     move_id_ = id;
-    moving_  = (m.n_steps > 0);
+    mode_    = (m.n_steps > 0) ? Mode::Planned : Mode::Idle;
 
     // The first step is due immediately. aim() has already waited out the
     // setup time, so the driver is ready.
@@ -71,7 +71,10 @@ void Stepper::begin(const Move &m, uint16_t id)
 
 bool Stepper::tick(absolute_time_t now)
 {
-    if (!moving_) {
+    if (mode_ == Mode::Chasing || mode_ == Mode::Braking) {
+        return chase_tick(now, mode_ == Mode::Braking);
+    }
+    if (mode_ != Mode::Planned) {
         return false;
     }
 
@@ -89,7 +92,7 @@ bool Stepper::tick(absolute_time_t now)
     index_++;
 
     if (index_ >= plan_.n_steps) {
-        moving_ = false;
+        mode_ = Mode::Idle;
         return false;
     }
 
@@ -110,9 +113,127 @@ bool Stepper::tick(absolute_time_t now)
     return true;
 }
 
+// ----------------------------------------------------------------------------
+// Chasing
+// ----------------------------------------------------------------------------
+
+void Stepper::arm_chase()
+{
+    // The target starts where the axis is, so arming on its own never moves
+    // anything. Something has to send a target first.
+    target_steps_ = pos_steps_;
+    v_sps_        = 0.0f;
+    index_        = 0;
+    aborted_      = false;
+    move_id_      = 0;
+    last_chase_   = get_absolute_time();
+    next_step_time_ = last_chase_;
+    first_pulse_  = last_chase_;
+    last_pulse_   = last_chase_;
+    mode_         = Mode::Chasing;
+}
+
+void Stepper::disarm_chase()
+{
+    // Ramped down rather than cut off, so an axis at speed is not jerked to
+    // a halt. Braking chases an error of zero, which is the same code.
+    if (mode_ == Mode::Chasing) {
+        mode_ = Mode::Braking;
+    }
+}
+
+void Stepper::set_target_steps(int32_t steps)
+{
+    target_steps_ = steps;
+}
+
+int32_t Stepper::velocity_mdps() const
+{
+    // steps/sec back into millidegrees/sec. Rounded, and the sign kept.
+    const float per_deg = static_cast<float>(spec_.steps_num) /
+                          static_cast<float>(spec_.steps_den);
+    if (per_deg <= 0.0f) {
+        return 0;
+    }
+    const float mdps = v_sps_ * 1000.0f / per_deg;
+    return static_cast<int32_t>(mdps < 0.0f ? mdps - 0.5f : mdps + 0.5f);
+}
+
+float Stepper::since_last_chase(absolute_time_t now)
+{
+    const int64_t gap = absolute_time_diff_us(last_chase_, now);
+    last_chase_       = now;
+    if (gap <= 0) {
+        return 0.0f;
+    }
+    // chase_velocity clamps this to CHASE_MAX_DT_S, so a loop held up by a
+    // flash write resumes gently instead of jumping.
+    return static_cast<float>(gap) / 1000000.0f;
+}
+
+bool Stepper::chase_tick(absolute_time_t now, bool braking)
+{
+    const float dt = since_last_chase(now);
+    const int32_t error = braking ? 0 : (target_steps_ - pos_steps_);
+
+    v_sps_ = chase_velocity(spec_, error, v_sps_, dt);
+
+    if (v_sps_ == 0.0f) {
+        if (braking) {
+            mode_ = Mode::Idle;  // come to rest; disarming is complete
+        }
+        // Still armed, just inside the deadband with nothing to do. The next
+        // step is due immediately once a target moves, rather than after a
+        // stale deadline.
+        next_step_time_ = now;
+        return false;
+    }
+
+    if (absolute_time_diff_us(now, next_step_time_) > 0) {
+        return true;  // not due yet
+    }
+
+    // The driver needs the direction pin settled before a pulse, and
+    // set_direction() blocks to arrange that. It is only ever reached here at
+    // a near standstill: the velocity ramp passes through zero before it
+    // changes sign, which the host tests check on every axis in both gear
+    // modes.
+    const bool positive = (v_sps_ > 0.0f);
+    if (positive != dir_positive_) {
+        set_direction(positive);
+        now = get_absolute_time();
+    }
+
+    step();
+    last_pulse_ = now;
+
+    const uint32_t gap = interval_us_at(v_sps_);
+    absolute_time_t next = delayed_by_us(next_step_time_, gap);
+
+    // Same guard as a planned move: a loop that was held up must not fire a
+    // burst of pulses trying to catch up, which is how a stepper loses its
+    // position.
+    if (absolute_time_diff_us(next, now) > static_cast<int64_t>(gap)) {
+        next = delayed_by_us(now, gap);
+    }
+    next_step_time_ = next;
+    return true;
+}
+
+// ----------------------------------------------------------------------------
+// Stopping
+// ----------------------------------------------------------------------------
+
 void Stepper::request_stop()
 {
-    if (!moving_) {
+    // While chasing there is no plan to shorten: stop means stop tracking
+    // and come to rest.
+    if (mode_ == Mode::Chasing) {
+        disarm_chase();
+        aborted_ = true;
+        return;
+    }
+    if (mode_ != Mode::Planned) {
         return;
     }
 
@@ -134,10 +255,11 @@ void Stepper::request_stop()
 
 void Stepper::estop()
 {
-    if (!moving_) {
+    if (mode_ == Mode::Idle) {
         return;
     }
-    moving_  = false;
+    mode_    = Mode::Idle;
+    v_sps_   = 0.0f;
     aborted_ = true;
 
     // Pulses stopped mid-move with no ramp down. A closed-loop driver will

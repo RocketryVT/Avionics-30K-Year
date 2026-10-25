@@ -72,6 +72,8 @@ const char *verb_name(Verb v)
     case Verb::Defaults: return "DEFAULTS";
     case Verb::Settings: return "SETTINGS";
     case Verb::Gear:     return "GEAR";
+    case Verb::Track:    return "TRACK";
+    case Verb::Target:   return "TARGET";
     case Verb::None:     break;
     }
     return "NONE";
@@ -104,6 +106,7 @@ const char *err_name(ErrCode e)
     case ErrCode::BadSetting: return "setting";
     case ErrCode::Range:      return "range";
     case ErrCode::Flash:      return "flash";
+    case ErrCode::NotTracking: return "track";
     }
     return "unknown";
 }
@@ -201,14 +204,16 @@ size_t format_cfg(char *buf, size_t n, uint16_t id, GearMode gear,
     // or UNSAVED without it would leave the operator guessing why.
     return finish(buf, n,
                   snprintf(buf, n,
-                           "CFG,%u,%ld,%ld,%ld,%ld,%ld,%ld,%s,%s,%s\n",
+                           "CFG,%u,%ld,%ld,%ld,%ld,%ld,%ld,%ld,%ld,%s,%s,%s\n",
                            static_cast<unsigned>(id),
                            static_cast<long>(az.accel_mdps2),
                            static_cast<long>(az.min_mdeg),
                            static_cast<long>(az.max_mdeg),
+                           static_cast<long>(az.deadband_mdeg),
                            static_cast<long>(el.accel_mdps2),
                            static_cast<long>(el.min_mdeg),
                            static_cast<long>(el.max_mdeg),
+                           static_cast<long>(el.deadband_mdeg),
                            (gear == GearMode::Geared) ? "GEARED" : "DIRECT",
                            saved ? "SAVED" : "UNSAVED",
                            built_in ? "BUILTIN" : "CUSTOM"));
@@ -227,6 +232,23 @@ size_t format_gear(char *buf, size_t n, uint16_t id, GearMode gear,
                            static_cast<long>(az.steps_den),
                            static_cast<long>(el.steps_num),
                            static_cast<long>(el.steps_den)));
+}
+
+size_t format_trk(char *buf, size_t n, uint16_t id, const TrackReport &r)
+{
+    // Position rides along because POS is refused while an axis is
+    // turning, and under tracking an axis is nearly always turning.
+    return finish(buf, n,
+                  snprintf(buf, n,
+                           "TRK,%u,%s,%ld,%ld,%ld,%ld,%ld,%ld\n",
+                           static_cast<unsigned>(id),
+                           r.armed ? "ON" : "OFF",
+                           static_cast<long>(r.az_target_mdeg),
+                           static_cast<long>(r.az_pos_mdeg),
+                           static_cast<long>(r.az_mdps),
+                           static_cast<long>(r.el_target_mdeg),
+                           static_cast<long>(r.el_pos_mdeg),
+                           static_cast<long>(r.el_mdps)));
 }
 
 size_t format_pong(char *buf, size_t n, uint16_t id, const char *target,

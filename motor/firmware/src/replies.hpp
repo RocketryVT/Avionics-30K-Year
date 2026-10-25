@@ -9,9 +9,12 @@
 //   PIN,<id>,<gpio>,<level>
 //   LIM,<id>,<az_min>,<az_max>,<az_spd_max>,
 //       <el_min>,<el_max>,<el_spd_max>,<spd_min>
-//   CFG,<id>,<az_accel>,<az_min>,<az_max>,<el_accel>,<el_min>,<el_max>,
+//   CFG,<id>,<az_accel>,<az_min>,<az_max>,<az_deadband>,
+//       <el_accel>,<el_min>,<el_max>,<el_deadband>,
 //       <GEARED|DIRECT>,<SAVED|UNSAVED>,<BUILTIN|CUSTOM>
 //   GEAR,<id>,<ON|OFF>,<az_num>,<az_den>,<el_num>,<el_den>
+//   TRK,<id>,<ON|OFF>,<az_target>,<az_pos>,<az_mdps>,
+//       <el_target>,<el_pos>,<el_mdps>
 //   PONG,<id>,<target>,<version>,<uptime_ms>
 //   MSTAT,<uptime_s>,<az>,<el>,<IDLE|MOVING>
 //   ERR,<id>,<code>,<detail>
@@ -25,6 +28,15 @@
 // GEAR answers both the question and the change, and carries the steps per
 // degree as an exact fraction so the laptop can show the ratio actually
 // being applied rather than one it worked out for itself.
+//
+// TRK answers TRACK, and is also sent unprompted a few times a second while
+// tracking, with an id of 0. It is the only report that arrives while an axis
+// is turning, and it carries position because POS cannot be asked for then.
+//
+// TARGET is answered with nothing at all when it is accepted. It arrives
+// several times a second and an ACK for each would double the traffic for no
+// information; the TRK stream already says which target is in force. Only a
+// refusal is sent back.
 //
 // All angles and speeds are whole millidegrees, matching the commands going
 // the other way. The laptop turns them back into degrees for the operator.
@@ -64,6 +76,7 @@ enum class ErrCode {
     BadSetting, // SET named a setting that does not exist
     Range,      // a SET value outside what this build allows
     Flash,      // SAVE could not write the settings to flash
+    NotTracking, // a TARGET arrived with tracking not armed
 };
 
 // The words used on the wire for each of these.
@@ -100,6 +113,20 @@ size_t format_cfg(char *buf, size_t n, uint16_t id, GearMode gear,
 // The gear mode in force and the steps per degree it gives each axis.
 size_t format_gear(char *buf, size_t n, uint16_t id, GearMode gear,
                    const AxisSpec &az, const AxisSpec &el);
+
+// Where tracking is pointing, where it has got to, and how fast it is
+// turning. An id of 0 means nobody asked - this is the running stream.
+struct TrackReport {
+    bool armed;
+    int32_t az_target_mdeg;
+    int32_t az_pos_mdeg;
+    int32_t az_mdps;
+    int32_t el_target_mdeg;
+    int32_t el_pos_mdeg;
+    int32_t el_mdps;
+};
+
+size_t format_trk(char *buf, size_t n, uint16_t id, const TrackReport &r);
 
 size_t format_pong(char *buf, size_t n, uint16_t id, const char *target,
                    const char *version, uint32_t uptime_ms);

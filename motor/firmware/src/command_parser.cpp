@@ -167,6 +167,25 @@ bool read_setting(const Field &f, Setting *out)
         *out = Setting::Max;
         return true;
     }
+    if (is_word(f, "DEADBAND")) {
+        *out = Setting::Deadband;
+        return true;
+    }
+    return false;
+}
+
+// ON or OFF, shared by GEAR and TRACK. False if it is neither, which is a
+// malformed field rather than a command we do not know.
+bool read_on_off(const Field &f, bool *out)
+{
+    if (is_word(f, "ON")) {
+        *out = true;
+        return true;
+    }
+    if (is_word(f, "OFF")) {
+        *out = false;
+        return true;
+    }
     return false;
 }
 
@@ -228,6 +247,12 @@ Command parse_command(const char *line)
     } else if (is_word(f[0], "GEAR")) {
         verb        = Verb::Gear;
         want_fields = 2;  // or 3 with a mode, handled below
+    } else if (is_word(f[0], "TRACK")) {
+        verb        = Verb::Track;
+        want_fields = 2;  // or 3 with a mode, handled below
+    } else if (is_word(f[0], "TARGET")) {
+        verb        = Verb::Target;
+        want_fields = 4;
     } else {
         return fail(ParseError::UnknownVerb);
     }
@@ -235,8 +260,10 @@ Command parse_command(const char *line)
     const bool zero_with_angle = (verb == Verb::Zero && n == 4);
     const bool move_both =
         ((verb == Verb::Move || verb == Verb::MoveTo) && n == 8);
-    const bool gear_with_mode  = (verb == Verb::Gear && n == 3);
-    if (n != want_fields && !zero_with_angle && !move_both && !gear_with_mode) {
+    const bool gear_with_mode = (verb == Verb::Gear && n == 3);
+    const bool track_with_mode = (verb == Verb::Track && n == 3);
+    if (n != want_fields && !zero_with_angle && !move_both &&
+        !gear_with_mode && !track_with_mode) {
         return fail(ParseError::Syntax);
     }
 
@@ -315,17 +342,36 @@ Command parse_command(const char *line)
 
     case Verb::Gear: {
         if (gear_with_mode) {
-            if (is_word(f[2], "ON")) {
-                c.gear_on = true;
-            } else if (is_word(f[2], "OFF")) {
-                c.gear_on = false;
-            } else {
-                // A word in the right place that is neither of the two is a
-                // malformed field, not a command we do not know.
+            if (!read_on_off(f[2], &c.gear_on)) {
                 return fail(ParseError::Syntax, c.id);
             }
             c.has_gear = true;
         }
+        break;
+    }
+
+    case Verb::Track: {
+        if (track_with_mode) {
+            if (!read_on_off(f[2], &c.track_on)) {
+                return fail(ParseError::Syntax, c.id);
+            }
+            c.has_track = true;
+        }
+        break;
+    }
+
+    case Verb::Target: {
+        // Only a guard against nonsense, as for MOVE. Whether the angles are
+        // reachable is decided later, and a target outside the travel limits
+        // is clamped rather than refused - see do_target.
+        int64_t az = 0;
+        int64_t el = 0;
+        if (!parse_int(f[2], -1000000, 1000000, &az) ||
+            !parse_int(f[3], -1000000, 1000000, &el)) {
+            return fail(ParseError::Syntax, c.id);
+        }
+        c.az_mdeg = static_cast<int32_t>(az);
+        c.el_mdeg = static_cast<int32_t>(el);
         break;
     }
 

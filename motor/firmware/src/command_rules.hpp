@@ -40,8 +40,20 @@
 // What the firmware knows about itself at the moment a command arrives.
 struct MachineState {
     // True while either axis is turning. One axis moving blocks commands for
-    // both.
+    // both - except TARGET and TRACK, which exist to be sent while it is.
     bool busy = false;
+
+    // True once TRACK ON has been accepted. A TARGET does nothing until it
+    // is, so a stray message cannot move anything.
+    bool tracking = false;
+
+    // Where tracking is pointing, in steps, for the TRK report.
+    int32_t az_target_steps = 0;
+    int32_t el_target_steps = 0;
+
+    // What each axis is turning at, millidegrees/sec, signed.
+    int32_t az_mdps = 0;
+    int32_t el_mdps = 0;
 
     bool az_zeroed = false;
     bool el_zeroed = false;
@@ -78,6 +90,8 @@ enum class Act {
     SetSettings,  // run with az_spec and el_spec from now on
     SaveSettings, // write the settings in force to flash
     SetGear,      // change gear mode: gear, az_spec and el_spec together
+    SetTrack,     // arm or disarm tracking on both axes
+    SetTarget,    // point here: az_steps and el_steps
 };
 
 // The most lines one command is answered with: a two-axis move's ACK and its
@@ -95,11 +109,15 @@ struct Decision {
     Move el_move{};
     uint16_t id = 0;
 
-    // SetZero: which axes to place, and where.
+    // SetZero, and SetTarget: which axes, and where. A target always names
+    // both, so zero_az/zero_el are not consulted for it.
     bool zero_az = false;
     bool zero_el = false;
     int32_t az_steps = 0;
     int32_t el_steps = 0;
+
+    // SetTrack: armed or not.
+    bool track_on = false;
 
     // SetPin. Driving a step line makes the driver take a step nobody
     // counted, so that axis no longer knows where it is.

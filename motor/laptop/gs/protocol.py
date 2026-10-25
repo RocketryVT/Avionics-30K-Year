@@ -20,8 +20,10 @@ The two directions, one line each, "\n" terminated:
     SET,<id>,<AZ|EL>,<name>,<value>     ERR,<id>,<code>,<detail>
     SAVE,<id>                           CFG,<id>,<az_accel>,...
     DEFAULTS,<id>                       GEAR,<id>,<ON|OFF>,<az_num>,...
-    SETTINGS,<id>
+    SETTINGS,<id>                       TRK,<id>,<ON|OFF>,<az_target>,...
     GEAR,<id>[,<ON|OFF>]
+    TRACK,<id>[,<ON|OFF>]
+    TARGET,<id>,<az_mdeg>,<el_mdeg>
 
 A MOVE can also turn both axes at once, each at its own speed:
 `MOVE,<id>,AZ,<mdps>,<mdeg>,EL,<mdps>,<mdeg>`. It is answered with one ACK,
@@ -38,6 +40,21 @@ whichever verb was sent, so the two can be told apart.
 SET changes one setting on one axis - ACCEL, or the MIN or MAX travel limit
 - until the Pico restarts. SAVE keeps the settings in flash, DEFAULTS goes
 back to the built-in ones from motor_config.hpp, and SETTINGS reports them.
+
+TRACK arms and disarms tracking; TARGET says where to point while it is
+armed. A target is absolute, names both axes, and is answered with **nothing
+at all** when accepted - it arrives several times a second and an ACK apiece
+would double the traffic without saying anything the TRK stream is not
+already saying. Only a refusal comes back.
+
+TRK answers TRACK, and also arrives unprompted a few times a second while
+tracking, with an id of 0. It is the only report that comes out while an axis
+is turning, and it carries position because POS cannot be asked for then.
+
+If targets stop arriving the Pico gives up tracking by itself after
+TRACK_TIMEOUT_MS and says so. That is what a radio dropout or a closed laptop
+looks like from the far end, and it is why a target can be clamped into the
+travel limits rather than refused.
 
 GEAR asks which gearing the Pico is counting, or switches it. OFF is the
 10:1 gearbox alone, with angles at the gearbox output shaft and each axis
@@ -95,7 +112,7 @@ GEAR_OFF = "OFF"
 
 # What SET can change: acceleration in deg/sec/sec, and the travel limits in
 # degrees. Both cross the wire in thousandths, like every other number.
-SETTING_NAMES = ("ACCEL", "MIN", "MAX")
+SETTING_NAMES = ("ACCEL", "MIN", "MAX", "DEADBAND")
 
 # Every axis word the firmware can put in a reply, including the two that
 # only turn up in errors.
@@ -116,6 +133,7 @@ ERR_MEANING = {
     "setting": "no such setting - use accel, min or max",
     "range": "that value is outside what this build allows",
     "flash": "the Pico could not write its flash, so nothing was saved",
+    "track": "tracking is not armed - send track on first",
 }
 
 
@@ -372,6 +390,38 @@ def settings(cmd_id: int) -> str:
     return f"SETTINGS,{_check_id(cmd_id)}"
 
 
+def track(cmd_id: int, on: bool | None = None) -> str:
+    """Ask whether tracking is armed, or arm and disarm it.
+
+    Arming needs both axes zeroed, and is refused with ERR nozero otherwise.
+    Disarming is never refused - it is the way out - and brings both axes to
+    a ramped stop rather than cutting the pulses.
+
+    While armed the Pico sends a TRK line a few times a second without being
+    asked, and gives up by itself if targets stop arriving.
+    """
+    _check_id(cmd_id)
+    if on is None:
+        return f"TRACK,{cmd_id}"
+    return f"TRACK,{cmd_id},{GEAR_ON if on else GEAR_OFF}"
+
+
+def target(cmd_id: int, az_deg: float, el_deg: float) -> str:
+    """Where to point, absolute, both axes. Only acted on while armed.
+
+    Fire and forget: the Pico answers an accepted target with nothing at all,
+    so there is no reply to wait for. Send it as often as fixes arrive.
+
+    A target outside an axis's travel limits is held at the limit rather than
+    refused, so the antenna keeps pointing as close as it can and picks the
+    rocket up again by itself when it comes back into range.
+    """
+    _check_id(cmd_id)
+    az = _check_mdeg(deg_to_mdeg(az_deg), az_deg, "azimuth")
+    el = _check_mdeg(deg_to_mdeg(el_deg), el_deg, "elevation")
+    return f"TARGET,{cmd_id},{az},{el}"
+
+
 def gear(cmd_id: int, on: bool | None = None) -> str:
     """Ask which gearing the Pico is counting, or switch it.
 
@@ -541,12 +591,19 @@ class Cfg(Reply):
     az_accel_mdps2: int
     az_min_mdeg: int
     az_max_mdeg: int
+    az_deadband_mdeg: int
     el_accel_mdps2: int
     el_min_mdeg: int
     el_max_mdeg: int
+    el_deadband_mdeg: int
     geared: bool
     saved: bool
     built_in: bool
+
+    def deadband_for(self, axis: str) -> int:
+        return (self.el_deadband_mdeg
+                if str(axis).strip().upper() == "EL"
+                else self.az_deadband_mdeg)
 
 
 @dataclass(frozen=True)
@@ -581,6 +638,42 @@ class Gear(Reply):
         if self.geared:
             return "geared - final pair counted, angles at the ANTENNA"
         return "direct - gearbox only, angles at the GEARBOX OUTPUT SHAFT"
+
+
+@dataclass(frozen=True)
+class Trk(Reply):
+    """Where tracking is pointing, where it has got to, and how fast.
+
+    `id` is 0 on the ones that arrive unprompted, which is most of them -
+    only the answer to a TRACK command carries the id that asked.
+
+    This is the only report that comes out while an axis is turning, so it
+    carries position: POS is refused then. `armed` going False without
+    anyone asking means the Pico's watchdog gave up, because targets stopped
+    arriving.
+    """
+
+    id: int
+    armed: bool
+    az_target_mdeg: int
+    az_pos_mdeg: int
+    az_mdps: int
+    el_target_mdeg: int
+    el_pos_mdeg: int
+    el_mdps: int
+
+    @property
+    def az_error_mdeg(self) -> int:
+        return self.az_target_mdeg - self.az_pos_mdeg
+
+    @property
+    def el_error_mdeg(self) -> int:
+        return self.el_target_mdeg - self.el_pos_mdeg
+
+    def error_for(self, axis: str) -> int:
+        return (self.el_error_mdeg
+                if str(axis).strip().upper() == "EL"
+                else self.az_error_mdeg)
 
 
 @dataclass(frozen=True)
@@ -682,8 +775,8 @@ class Info(Reply):
 # human and is passed through untouched.
 RECORD_NAMES = frozenset(
     {
-        "ACK", "PLAN", "DONE", "POS", "PIN", "LIM", "CFG", "GEAR", "PONG",
-        "MSTAT", "ERR",
+        "ACK", "PLAN", "DONE", "POS", "PIN", "LIM", "CFG", "GEAR", "TRK",
+        "PONG", "MSTAT", "ERR",
     }
 )
 
@@ -799,18 +892,32 @@ def parse_reply(line: str) -> Reply:
                 speed_min_mdps=_int(f[8]),
             )
 
-        if name == "CFG" and len(f) == 11:
+        if name == "CFG" and len(f) == 13:
             return Cfg(
                 id=_int(f[1]),
                 az_accel_mdps2=_int(f[2]),
                 az_min_mdeg=_int(f[3]),
                 az_max_mdeg=_int(f[4]),
-                el_accel_mdps2=_int(f[5]),
-                el_min_mdeg=_int(f[6]),
-                el_max_mdeg=_int(f[7]),
-                geared=_word(f[8], "GEARED", "DIRECT"),
-                saved=_word(f[9], "SAVED", "UNSAVED"),
-                built_in=_word(f[10], "BUILTIN", "CUSTOM"),
+                az_deadband_mdeg=_int(f[5]),
+                el_accel_mdps2=_int(f[6]),
+                el_min_mdeg=_int(f[7]),
+                el_max_mdeg=_int(f[8]),
+                el_deadband_mdeg=_int(f[9]),
+                geared=_word(f[10], "GEARED", "DIRECT"),
+                saved=_word(f[11], "SAVED", "UNSAVED"),
+                built_in=_word(f[12], "BUILTIN", "CUSTOM"),
+            )
+
+        if name == "TRK" and len(f) == 9:
+            return Trk(
+                id=_int(f[1]),
+                armed=_word(f[2], GEAR_ON, GEAR_OFF),
+                az_target_mdeg=_int(f[3]),
+                az_pos_mdeg=_int(f[4]),
+                az_mdps=_int(f[5]),
+                el_target_mdeg=_int(f[6]),
+                el_pos_mdeg=_int(f[7]),
+                el_mdps=_int(f[8]),
             )
 
         if name == "GEAR" and len(f) == 7:

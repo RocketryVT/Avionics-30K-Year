@@ -250,24 +250,27 @@ class App:
         frame = self._frame(row, "settings")
         for col, head in enumerate(
                 ("", "accel deg/s/s", "travel min", "travel max",
-                 "speed deg/s")):
+                 "deadband deg", "speed deg/s")):
             self._value(frame, 0, col, head, font=self.bold)
 
         self.e_accel: dict[str, ttk.Entry] = {}
         self.e_min: dict[str, ttk.Entry] = {}
         self.e_max: dict[str, ttk.Entry] = {}
+        self.e_dead: dict[str, ttk.Entry] = {}
         self.v_speed: dict[str, ttk.Label] = {}
         for line, axis in ((1, "az"), (2, "el")):
             self._value(frame, line, 0, axis, font=self.bold)
             self.e_accel[axis] = self._entry(frame, line, 1)
             self.e_min[axis] = self._entry(frame, line, 2)
             self.e_max[axis] = self._entry(frame, line, 3)
-            self.v_speed[axis] = self._value(frame, line, 4)
+            # Only bites while tracking; harmless to set at any time.
+            self.e_dead[axis] = self._entry(frame, line, 4)
+            self.v_speed[axis] = self._value(frame, line, 5)
 
-        self.v_saved = self._value(frame, 3, 0, "", columnspan=3)
+        self.v_saved = self._value(frame, 3, 0, "", columnspan=4)
 
         buttons = ttk.Frame(frame)
-        buttons.grid(row=3, column=3, columnspan=2, sticky="e", **PAD)
+        buttons.grid(row=3, column=4, columnspan=2, sticky="e", **PAD)
         self.b_apply = ttk.Button(buttons, text="apply",
                                   command=self._apply_settings)
         self.b_apply.grid(row=0, column=0, padx=2)
@@ -277,7 +280,7 @@ class App:
         self.b_defaults = ttk.Button(buttons, text="defaults",
                                      command=self.worker.defaults)
         self.b_defaults.grid(row=0, column=2, padx=2)
-        frame.columnconfigure(4, weight=1)
+        frame.columnconfigure(5, weight=1)
 
     def _build_mode_panels(self, row: int) -> None:
         holder = self._frame(row, "move")
@@ -461,6 +464,7 @@ class App:
                 ("ACCEL", self.e_accel[axis], f"{axis}_accel_mdps2"),
                 ("MIN", self.e_min[axis], f"{axis}_min_mdeg"),
                 ("MAX", self.e_max[axis], f"{axis}_max_mdeg"),
+                ("DEADBAND", self.e_dead[axis], f"{axis}_deadband_mdeg"),
             ):
                 try:
                     value = self._read(entry, f"{axis} {name.lower()}")
@@ -665,6 +669,9 @@ class App:
                            p.format_mdeg(getattr(st.cfg, f"{axis}_min_mdeg")))
                 self._fill(self.e_max[axis],
                            p.format_mdeg(getattr(st.cfg, f"{axis}_max_mdeg")))
+                self._fill(
+                    self.e_dead[axis],
+                    p.format_mdeg(getattr(st.cfg, f"{axis}_deadband_mdeg")))
             speed = "-"
             if st.lim is not None:
                 speed = (f"{p.format_mdeg(st.lim.speed_min_mdps)}"

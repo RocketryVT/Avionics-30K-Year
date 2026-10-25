@@ -18,6 +18,12 @@ an error with no id (below) can be attributed at all.
 replies arrive long after the command, with heartbeats in between. Every
 reply carries the id of the command that caused it.
 
+**Keeping the tracking stream out of the way.** While tracking, the Pico
+sends a TRK line a few times a second with an id of 0. Nobody asked for it,
+so it goes to `on_chatter` like the heartbeat does rather than being kept as
+somebody's answer - otherwise it would fill the spare-replies list and be
+mistaken for a reply to whatever came next.
+
 **Noticing a Pico that restarted.** PING and the heartbeat both report how
 long the Pico has been up. If that goes backwards it rebooted, which means
 it has forgotten where the antenna is. Moving after that without a fresh
@@ -190,7 +196,13 @@ class Session:
                 self.rebooted = True
             self._last_uptime_s = uptime_s
 
-        if isinstance(record, (p.Mstat, p.Info)) and self.on_chatter is not None:
+        # An unprompted TRK is chatter in the same sense MSTAT is: nobody
+        # asked for it. Dropping it would throw away the only report that
+        # arrives while an axis is turning.
+        unasked = isinstance(record, (p.Mstat, p.Info)) or (
+            isinstance(record, p.Trk) and record.id == 0
+        )
+        if unasked and self.on_chatter is not None:
             self.on_chatter(record)
         if self.on_record is not None:
             self.on_record(record)
@@ -267,7 +279,9 @@ class Session:
                 return record
             if _is_error_for(record, cmd_id):
                 raise Refused(record)
-            if not isinstance(record, (p.Mstat, p.Info)):
+            if not isinstance(record, (p.Mstat, p.Info)) and not (
+                isinstance(record, p.Trk) and record.id == 0
+            ):
                 # A reply to something else - most likely the DONE of a move
                 # whose wait was given up. Kept rather than dropped, so
                 # whoever is waiting for it can still find it.
@@ -348,6 +362,31 @@ class Session:
         """The settings in force, and whether they are saved."""
         cmd_id = self.ids.next()
         return self.request(p.settings(cmd_id), cmd_id, (p.Cfg,), "SETTINGS")
+
+    def track(self, on: bool | None = None) -> p.Trk:
+        """Ask whether tracking is armed, or arm and disarm it.
+
+        Returns what the Pico is doing afterwards. Arming is refused unless
+        both axes are zeroed; disarming never is.
+        """
+        cmd_id = self.ids.next()
+        return self.request(p.track(cmd_id, on), cmd_id, (p.Trk,), "TRACK")
+
+    def set_target(self, az_deg: float, el_deg: float) -> None:
+        """Say where to point. Fire and forget.
+
+        No reply is waited for, because an accepted target is answered with
+        nothing - the TRK stream already reports the target in force. Same
+        pattern as `stop` and `estop`.
+
+        A refusal therefore raises nothing here: it arrives as an ERR whose
+        id nobody is waiting for. It is not lost - every record reaches
+        `on_record`, so it shows up in a log - but it will not interrupt the
+        caller. The signal to watch is the TRK stream: the only thing that
+        refuses a target is tracking not being armed, and TRK says whether it
+        is on every line.
+        """
+        self._send(p.target(self.ids.next(), az_deg, el_deg))
 
     def gear(self) -> p.Gear:
         """Which gearing the Pico is counting. Changes nothing."""
