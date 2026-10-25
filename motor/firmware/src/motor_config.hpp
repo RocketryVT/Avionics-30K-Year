@@ -314,15 +314,18 @@ constexpr AxisSpec AZ_SPEC_GEARED =
 // ----------------------------------------------------------------------------
 // Elevation (the board calls it Servo 2)
 // ----------------------------------------------------------------------------
-// Direct travel is 0 to 360 degrees of the gearbox shaft, verified safe at
-// the bench on 18 Oct 2026 with the axis tested on its own.
+// Direct travel is -25 to 360 degrees of the gearbox shaft. 0 to 360 was
+// verified safe at the bench on 18 Oct 2026 with the axis tested on its own;
+// the minimum went to -25 on 25 Oct 2026 so moves below the zero could be
+// tried. Narrow it at the prompt (`set el min 0`) if that is not wanted - a
+// limit can be narrowed without reflashing, only widened by editing here.
 //
 // Acceleration is the same 135 deg/sec/sec as azimuth. Recheck it once the
 // axis is lifting the antenna's weight.
 constexpr AxisSpec EL_SPEC = {
     400,     // steps_num
     9,       // steps_den     -> 44.444 steps per degree
-    0,       // min_mdeg      0 degrees
+    -25000,  // min_mdeg      -25 degrees. Asked for at the bench, 25 Oct 2026
     360000,  // max_mdeg      360 degrees of the gearbox shaft
     true,    // invert_dir    verified at the bench 25 Oct 2026: `move el
              //               45 180` turned 180 the wrong way with false
@@ -346,7 +349,10 @@ constexpr AxisSpec EL_SPEC = {
 // prompt (`set el max 170`, `save`) rather than here if it turns out tighter.
 constexpr AxisSpec EL_SPEC_GEARED =
     geared(EL_SPEC, EL_PAIR,
-           0,       // min_mdeg    0 degrees
+           -25000,  // min_mdeg    25 degrees below the zero. If the zero is
+                    //             horizontal, that is pointing below the
+                    //             horizon - last year's system stopped at
+                    //             -10, so check the mount clears -25 first
            180000,  // max_mdeg    180 degrees of antenna
            true);   // invert_dir  same as direct, because a belt does not
                     //             reverse rotation. Not yet seen with the
