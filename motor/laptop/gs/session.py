@@ -104,6 +104,15 @@ class Session:
         # heartbeat, the startup banner, `[fatal]` messages.
         self.on_chatter = None
 
+        # Called with every line sent, and with every record read, whatever
+        # it is. These are for a log of the conversation itself - the GUI's
+        # log pane - where `on_chatter` only carries the lines nobody asked
+        # for. All three are called on whichever thread is driving the
+        # session, so a handler should hand the line off rather than do work
+        # in it.
+        self.on_send = None
+        self.on_record = None
+
         self._buf = b""
         # Replies read while waiting for a different one.
         self._spare: list[p.Reply] = []
@@ -183,6 +192,8 @@ class Session:
 
         if isinstance(record, (p.Mstat, p.Info)) and self.on_chatter is not None:
             self.on_chatter(record)
+        if self.on_record is not None:
+            self.on_record(record)
 
         return record
 
@@ -210,8 +221,21 @@ class Session:
     # --- sending ------------------------------------------------------------
 
     def _send(self, line: str) -> None:
-        self.conn.write(p.encode(line))
-        self.conn.flush()
+        # Wrapped the same way _read_some() wraps a failed read: a port that
+        # went away raises whatever pyserial feels like, and everything above
+        # here is written to expect SessionError. Without this a cable pulled
+        # between two commands comes out as a bare OSError and takes the
+        # caller down with it.
+        try:
+            self.conn.write(p.encode(line))
+            self.conn.flush()
+        except p.CommandError:
+            raise  # ours, and a fault in the caller rather than the port
+        except Exception as exc:
+            raise SessionError(f"lost the connection: {exc}") from exc
+
+        if self.on_send is not None:
+            self.on_send(line)
 
     def _await(
         self,
