@@ -402,6 +402,14 @@ Decision do_track(const Command &c, const MachineState &s)
 {
     const bool wanted = c.has_track ? c.track_on : s.tracking;
 
+    // A new tracking session must start from idle. arm_chase() resets the
+    // plan, move ID and velocity, so using it during a planned move or while
+    // braking would silently discard that motion. Queries, TRACK OFF and
+    // repeated TRACK ON while already armed remain available.
+    if (wanted && !s.tracking && s.busy) {
+        return refuse(c, ErrCode::Busy, "");
+    }
+
     // Arming needs both axes zeroed, for the same reason a move does: the
     // soft limits are measured from the zero, and without one they are no
     // protection at all. Disarming is never refused - it is the way out.

@@ -65,8 +65,9 @@ public:
 
     // --- chasing a target --------------------------------------------------
 
-    // Start chasing. The target begins at wherever the axis is, so arming
-    // alone never moves anything; it waits for a target.
+    // Start chasing from idle, reasserting DIR for the current spec. The
+    // target begins at wherever the axis is, so arming alone emits no steps;
+    // it waits for a target.
     void arm_chase();
 
     // Stop chasing and come to rest, ramping down rather than cutting the
@@ -159,8 +160,8 @@ private:
     int32_t pos_steps_ = 0;
     bool zeroed_       = false;
 
-    // Which way the DIR pin is pointing, so a reversal can be spotted.
-    // Starts matching what init() writes.
+    // Logical direction used to count steps. init(), aim() and arm_chase()
+    // synchronize DIR before pulses; an idle PIN write can disturb the pad.
     bool dir_positive_ = true;
 
     // --- the move in progress ---------------------------------------------

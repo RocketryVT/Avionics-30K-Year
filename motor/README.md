@@ -171,7 +171,7 @@ the gap on its own.
 
 | | |
 | --- | --- |
-| `track on` | Arm it. Needs both axes zeroed, like any move |
+| `track on` | Arm it. Needs both axes idle and zeroed |
 | `track off` | Disarm, ramping to a stop. Never refused |
 | `TARGET` | Where to point, absolute, both axes. Sent by the tracking program, not typed |
 
@@ -219,6 +219,12 @@ a stalled step loop.
 `stop` and `estop` end tracking. While it is armed, every other command
 except `track` is refused as busy - `track off` first, then zero, move or
 change gear.
+
+Starting tracking also requires both axes to be idle: `track on` returns
+`busy` during a planned move or while braking after tracking stops. Wait for
+the move to finish or the axes to come to rest before arming again. Status
+queries and `track off` remain available, and `track on` while already armed
+leaves the current tracking session running.
 
 #### Sending the targets
 

@@ -5,8 +5,8 @@
 //
 //     forever:
 //         let each axis send a pulse if one is due
-//         read any bytes that arrived, and act on a complete line
 //         report any axis that has just finished
+//         read any bytes that arrived, and act on a complete line
 //         send a heartbeat if it is time and nothing is moving
 //
 // No interrupts, no second core. The loop runs far more often than steps are
@@ -205,7 +205,7 @@ static const char *gear_note(GearMode g)
 
 static void print_banner(LoadResult loaded)
 {
-    printf("[motor] pins AZ PUL=GP%u DIR=GP%u  EL PUL=GP%u DIR=GP%u  idle HIGH OK\n",
+    printf("[motor] pins AZ PUL=GP%u DIR=GP%u  EL PUL=GP%u DIR=GP%u  startup levels OK\n",
            PIN_AZ_PUL, PIN_AZ_DIR, PIN_EL_PUL, PIN_EL_DIR);
     printf("[motor] active low: PUL rests HIGH and is pulled LOW to step\n");
 
@@ -462,37 +462,42 @@ static void report_done(Stepper &s, AxisId axis)
 
 int main()
 {
+    // These are bounded, read-only flash operations. Resolve the final
+    // specs before selecting DIR, then establish both outputs before stdio
+    // initialization or any wait for a host. An overlapping settings sector
+    // is never read; park the pins using the built-in specs and report the
+    // error once USB is available.
+    const bool settings_free = settings_sector_is_free();
+    const LoadResult loaded = settings_free ? read_boot_settings()
+                                            : LoadResult::Blank;
+    g_gear    = g_boot_gear;
+    g_az_spec = g_boot_az;
+    g_el_spec = g_boot_el;
+
+    g_az.init();
+    g_el.init();
+
     stdio_init_all();
     wait_for_usb_forever();
 
     printf("=== gs_pico_link %s %s ===\n", GS_TARGET_NAME, GS_VERSION);
 
-    g_az.init();
-    g_el.init();
-
     if (!g_az.pins_ok()) {
-        fatal_forever("azimuth pins did not read back idle HIGH");
+        fatal_forever("azimuth pins did not read back their startup levels");
     }
     if (!g_el.pins_ok()) {
-        fatal_forever("elevation pins did not read back idle HIGH");
+        fatal_forever("elevation pins did not read back their startup levels");
     }
 
-    // Load the settings before the banner, so the banner shows what is in
-    // force.
-    if (!settings_sector_is_free()) {
+    if (!settings_free) {
         fatal_forever("the program has grown into the settings sector");
     }
-    const LoadResult loaded = read_boot_settings();
-    g_gear    = g_boot_gear;
-    g_az_spec = g_boot_az;
-    g_el_spec = g_boot_el;
 
     print_banner(loaded);
 
     absolute_time_t next_heartbeat =
         delayed_by_ms(get_absolute_time(), HEARTBEAT_PERIOD_MS);
     absolute_time_t next_track_report = next_heartbeat;
-    bool was_moving = false;
 
     for (;;) {
         const absolute_time_t now = get_absolute_time();
@@ -501,11 +506,12 @@ int main()
         const bool el_moving = g_el.tick(now);
         const bool moving    = az_moving || el_moving;
 
-        poll_input();
-
-        // An axis that has just finished reports once. Checked after tick()
-        // so the last pulse is already out.
-        if (was_moving && !moving) {
+        // Report completed plans before accepting another command. TRACK ON
+        // or a new MOVE may replace a stepper's move ID, so accepting one
+        // between the last pulse and DONE would erase the old report. The
+        // pending ID also catches a one-step move, whose first tick finishes
+        // it without ever returning true for moving.
+        if (!moving) {
             if (!g_az.moving() && g_az.move_id() != 0) {
                 report_done(g_az, AxisId::Az);
                 g_az.clear_move_id();
@@ -515,7 +521,7 @@ int main()
                 g_el.clear_move_id();
             }
         }
-        was_moving = moving;
+        poll_input();
 
         // The watchdog. Targets arriving is the only sign the other end is
         // still there, so if they stop, the axes come to rest and stay

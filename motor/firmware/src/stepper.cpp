@@ -27,21 +27,10 @@ bool Stepper::pins_ok() const
 
 void Stepper::set_direction(bool positive)
 {
-    // Measured against the PIN, not against dir_positive_. That belief goes
-    // stale two ways, and both of them flip the pin while this code thinks
-    // nothing is changing - so the reversal happens with 100 us of settle
-    // instead of the full pause:
-    //
-    //   a gear change    spec_ is a REFERENCE to g_az_spec / g_el_spec, which
-    //                    Act::SetGear replaces whole. Azimuth's invert_dir is
-    //                    true direct and false geared, so switching mode
-    //                    inverts what every level worked out here means,
-    //                    without dir_positive_ moving at all.
-    //   the PIN command  writes the pin straight, to hold a line steady for a
-    //                    multimeter, and tells this class nothing.
-    //
-    // gpio_get() on an output pin reads the pad back, so it cannot disagree
-    // with the world the way a remembered bool can.
+    // Check the pad rather than only the remembered sign: an idle PIN
+    // command may have written a different level, or a replacement spec may
+    // have changed invert_dir. This readback does not verify the voltage or
+    // current at the driver's input.
     const bool level     = dir_level(positive, spec_.invert_dir);
     const bool reversing = (level != gpio_get(pin_dir_));
 
@@ -135,6 +124,13 @@ bool Stepper::tick(absolute_time_t now)
 
 void Stepper::arm_chase()
 {
+    // PIN and spec changes are allowed while idle and can leave DIR out of
+    // sync with the remembered sign. Reassert it using the current spec and
+    // wait for setup before tracking can emit a pulse. If the first target
+    // asks for the other direction, chase_tick() will set that up as usual.
+    // Neither PIN nor spec changes are allowed once tracking is armed.
+    set_direction(dir_positive_);
+
     // The target starts where the axis is, so arming on its own never moves
     // anything. Something has to send a target first.
     target_steps_ = pos_steps_;
