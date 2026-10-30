@@ -27,10 +27,15 @@ bool Stepper::pins_ok() const
 
 void Stepper::set_direction(bool positive)
 {
-    const bool reversing = (positive != dir_positive_);
+    // Check the pad rather than only the remembered sign: an idle PIN
+    // command may have written a different level, or a replacement spec may
+    // have changed invert_dir. This readback does not verify the voltage or
+    // current at the driver's input.
+    const bool level     = dir_level(positive, spec_.invert_dir);
+    const bool reversing = (level != gpio_get(pin_dir_));
 
     dir_positive_ = positive;
-    gpio_put(pin_dir_, dir_level(positive, spec_.invert_dir));
+    gpio_put(pin_dir_, level);
 
     // The driver wants the direction settled well before the next pulse, and
     // a reversal is where that is tightest, so it gets an extra pause.
@@ -119,6 +124,13 @@ bool Stepper::tick(absolute_time_t now)
 
 void Stepper::arm_chase()
 {
+    // PIN and spec changes are allowed while idle and can leave DIR out of
+    // sync with the remembered sign. Reassert it using the current spec and
+    // wait for setup before tracking can emit a pulse. If the first target
+    // asks for the other direction, chase_tick() will set that up as usual.
+    // Neither PIN nor spec changes are allowed once tracking is armed.
+    set_direction(dir_positive_);
+
     // The target starts where the axis is, so arming on its own never moves
     // anything. Something has to send a target first.
     target_steps_ = pos_steps_;
