@@ -301,11 +301,22 @@ constexpr AxisSpec AZ_SPEC = {
     9,       // steps_den     -> 44.444 steps per degree
     -180000, // min_mdeg      -180 degrees
     180000,  // max_mdeg      +180 degrees
-    true,    // invert_dir    NOT YET CONFIRMED. Set while the azimuth
-             //               driver was turning one way for every command,
-             //               + or -, which is a wiring or driver fault this
-             //               setting cannot fix. Once it reverses, check
-             //               with `move az 5 10` then `move az 5 -10`.
+    false,   // invert_dir    No axis inverts now: all four specs are false.
+             //               It was true from 26 Oct 2026 (commit dbaeee2),
+             //               set while the azimuth driver was turning one
+             //               way for every command, + or - - evidence from a
+             //               faulty drive, so the value was never worth
+             //               much. Put back to false on 28 Oct 2026.
+             //
+             //               It also decides which level the DIR pin RESTS
+             //               at between boot and the first move, because
+             //               init() parks the pin at dir_level(true,
+             //               invert_dir). False rests it LOW, which is the
+             //               4.8 V the optocoupler reads definitely; true
+             //               rested it HIGH, which is 1.7 V and no defined
+             //               level at all. Elevation has always rested LOW.
+             //
+             //               Check with `move az 5 10` then `move az 5 -10`.
     V_START_MDPS,
     135000,  // accel_mdps2   135 deg/sec/sec (aiming for 180)
     ACCEL_MIN_MDPS2,
@@ -423,6 +434,38 @@ constexpr float CHASE_MAX_DT_S = 0.05f;  // 50 ms
 // are what last year's ground station ran, which is far more generous. There
 // is no reason to shave them: even at full speed one step is still 124 us
 // from the next.
-constexpr uint32_t PULSE_LOW_US     = 5;    // how long PUL is held LOW
+//
+// The pulse is 20 us rather than the 1 us minimum because of the sentence
+// that follows it in section 8: "duty cycle is recommended 50%. If it is
+// greater or less than 50%, the width time is required to be wider." At
+// 15 deg/s one step is 1500 us from the next, so a 5 us pulse was a 0.3%
+// duty cycle - three orders of magnitude off the recommendation, and a thin
+// edge to ask an optocoupler to pass. 20 us is still only 16% of the 124 us
+// that separates two steps at full speed, so it costs nothing at that end
+// either, and MIN_INTERVAL_US (50 us) leaves it room even there.
+constexpr uint32_t PULSE_LOW_US     = 20;   // how long PUL is held LOW
 constexpr uint32_t DIR_SETUP_US     = 100;  // settle time after changing DIR
-constexpr uint32_t REVERSE_PAUSE_MS = 1;    // extra pause before reversing
+// The extra wait when the DIR pin actually CHANGES level, on top of the
+// setup time above.
+//
+// Nothing in the CL57TE manual asks for this. Its sequence chart wants DIR
+// stable 5 us before the pulse edge and says nothing else about direction,
+// and DIR_SETUP_US already clears that twenty times over. The reason it is
+// 25 ms rather than 1 is a bench symptom: an axis commanded to reverse would
+// turn the OLD way for a fraction of a second and then come back, which is
+// the drive acting on the previous direction for the first pulses and
+// catching up part way through. That is an input that has not finished
+// switching, and these inputs are driven under spec - a Pico high is 3.3 V
+// against the 5-24 V the drive asks for, and an optocoupler given less than
+// it wants is slow to turn OFF in particular.
+//
+// A PLANNED MOVE PAYS NOTHING FOR THIS. aim() runs while the axis is still
+// standing, and a two-axis move aims both before either begins, so the wait
+// happens with nothing turning.
+//
+// TRACKING DOES PAY. chase_tick() reverses mid-flight, and the loop is
+// single threaded, so this stops the other axis for the whole pause. 25 ms
+// is kept under CHASE_MAX_DT_S (50 ms) so a starved chase loop still resumes
+// from a time step it believes. If tracking ever looks lumpy, this is the
+// first number to bring back down.
+constexpr uint32_t REVERSE_PAUSE_MS = 25;   // extra pause before reversing

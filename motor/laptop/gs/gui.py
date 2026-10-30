@@ -42,6 +42,14 @@ Choosing a mode changes the gearing, **which costs both axes their zero**,
 so it asks first. Modes 2 and 3 are both `gear on`, so moving between them
 costs nothing.
 
+The window opens in mode 2, because that is how the assembled antenna is
+driven; mode 1 is for a motor on the bench. What is on screen still has to
+agree with the Pico, though, so the first reading settles it - see
+`_settle_mode`: with nothing zeroed the gearing is switched to match, which
+is free because a gear change costs only the zeros and there are none yet;
+with the axes already zeroed the window gives way instead and shows
+whichever mode the Pico's gearing is.
+
 Typing commands
 ---------------
 
@@ -137,7 +145,33 @@ MODE_NOTE = {
                 "source, then arm it",
 }
 
+# The mode the window opens in: the assembled antenna is driven through the
+# belt with both axes in one command, so that is what should be on screen
+# when the window appears. Mode 1 is for a motor on its own at the bench.
+# `_settle_mode` is what makes the Pico agree with this, or the window give
+# way to the Pico.
+MODE_DEFAULT = MODE_COMBINED
+
 PAD = {"padx": 6, "pady": 3}
+
+WINDOW_TITLE = "gs motor"
+
+# The palette. Plain is what a bench window is for, but plain need not mean
+# grey on grey: colour is how a reading gets found without being read, which
+# is the whole job of the zero, the stops and the status line.
+#
+# ttk only honours these under the "clam" theme, which is why _build_style
+# leaves the native one behind. See the note there.
+INK = "#1b2026"        # ordinary text
+MUTED = "#6b7580"      # units, hints, anything read second
+EDGE = "#ccd3da"       # panel borders
+CANVAS = "#eef1f4"     # the window behind the panels
+CARD = "#fbfcfd"       # the panels themselves
+GOOD = "#0a7a46"       # zeroed, connected, finished
+WARN = "#b45309"       # something is needed before anything will move
+BAD = "#c0271a"        # not connected, not zeroed, stopped short
+BUSY = "#1f6feb"       # something is happening right now
+TYPED_INK = "#7a4bbf"  # a line somebody typed, in the conversation pane
 
 
 def _uptime(ms: int) -> str:
@@ -174,11 +208,30 @@ class App:
         self._move_from: float | None = None
         self._move_est_s = 0.0
 
-        root.title("gs motor")
-        root.minsize(820, 760)
+        root.title(WINDOW_TITLE)
+        # The smallest it can be dragged to, not the size it opens at - that
+        # is worked out from the layout at the end of this method.
+        root.minsize(820, 620)
         self.mono = tkfont.nametofont("TkFixedFont").copy()
         self.bold = tkfont.nametofont("TkDefaultFont").copy()
         self.bold.configure(weight="bold")
+        self.heading = tkfont.nametofont("TkDefaultFont").copy()
+        self.heading.configure(weight="bold")
+        # The two position readings get the extra points, because they are
+        # what gets read from the other side of a bench. A Tk font size is
+        # points when positive and pixels when negative, and the two count in
+        # opposite directions, hence the sign.
+        self.big = self.mono.copy()
+        size = self.mono.cget("size")
+        self.big.configure(size=size + (3 if size > 0 else -3),
+                           weight="bold")
+
+        # What the title bar already says. Not a remembered reading - the
+        # port comes from the State every time - it only keeps Tk from being
+        # told twice a second what it already knows.
+        self._title = WINDOW_TITLE
+
+        self._build_style()
 
         root.columnconfigure(0, weight=3)
         root.columnconfigure(1, weight=2)
@@ -193,9 +246,21 @@ class App:
         self._build_stops(6)
         self._build_status(7)
 
-        self.mode.set(MODE_INDEPENDENT)
-        self._show_mode_panel(MODE_INDEPENDENT)
-        self._applied_mode = MODE_INDEPENDENT
+        # Opens on MODE_DEFAULT. The first reading from the Pico settles
+        # whether that stands or the window follows the machine instead.
+        self.mode.set(MODE_DEFAULT)
+        self._show_mode_panel(MODE_DEFAULT)
+        self._applied_mode = MODE_DEFAULT
+        self._mode_settled = False
+
+        # Never bigger than the desktop. A window whose bottom edge is off
+        # the screen is a window with the STOP buttons off the screen, and
+        # rule 3 says those are always reachable. A ceiling rather than a
+        # fixed size, so the window still sizes itself to its contents: a
+        # reading that grows a column - six figures of steps, a longer
+        # status - must not push a button off the right-hand edge.
+        root.maxsize(root.winfo_screenwidth() - 40,
+                     root.winfo_screenheight() - 80)
 
         # Escape is the ramped stop, deliberately not the emergency one: the
         # key that is easy to hit by accident should be the one that does not
@@ -205,6 +270,71 @@ class App:
         self.root.after(DRAIN_MS, self._drain)
 
     # --- building ----------------------------------------------------------
+
+    def _build_style(self) -> None:
+        """One place for the look. No behaviour belongs in here.
+
+        The native Windows theme draws its own backgrounds and quietly
+        ignores a colour asked for in a style, so the palette would do
+        nothing under it; "clam" is the bundled theme that honours them, and
+        it ships with every Tk. If some stripped-down Tk has not got it the
+        window still works - it just comes up looking like stock Tk.
+        """
+        style = ttk.Style(self.root)
+        if "clam" in style.theme_names():
+            style.theme_use("clam")
+
+        self.root.configure(bg=CANVAS)
+        style.configure(".", background=CARD, foreground=INK,
+                        fieldbackground="white", bordercolor=EDGE,
+                        lightcolor=CARD, darkcolor=EDGE, focuscolor=BUSY)
+        for name in ("TFrame", "TLabel", "TLabelframe", "TRadiobutton",
+                     "TCheckbutton"):
+            style.configure(name, background=CARD)
+        # The panels read as cards on the window's own colour, which is what
+        # the gaps between them are.
+        style.configure("TLabelframe", bordercolor=EDGE, relief="solid",
+                        borderwidth=1, padding=(8, 6))
+        style.configure("TLabelframe.Label", foreground=MUTED,
+                        font=self.heading)
+        style.configure("Canvas.TFrame", background=CANVAS)
+        style.configure("Hint.TLabel", foreground=MUTED)
+
+        style.configure("TButton", padding=(7, 4), borderwidth=1,
+                        background="#e7ebf0", bordercolor=EDGE)
+        style.map("TButton",
+                  background=[("disabled", "#eef1f4"),
+                              ("active", "#dbe3ec")],
+                  foreground=[("disabled", "#a7b0ba")])
+        # The buttons that start a move, told apart from the ones that only
+        # read something or set a number.
+        style.configure("Go.TButton", background=BUSY, foreground="white",
+                        bordercolor=BUSY)
+        style.map("Go.TButton",
+                  background=[("disabled", "#c3d2e8"),
+                              ("active", "#3b82f6")],
+                  foreground=[("disabled", "#eef1f4")])
+        # Arming is the one button that sets the motors going with nobody
+        # touching anything, so it does not look like its neighbours.
+        style.configure("Arm.TButton", background=WARN, foreground="white",
+                        bordercolor=WARN)
+        style.map("Arm.TButton",
+                  background=[("disabled", "#e3cdb2"),
+                              ("active", "#d97706")],
+                  foreground=[("disabled", "#f7f3ee")])
+
+        # The status line, in four colours for the four things it says. The
+        # style is swapped in `show`, where the State is.
+        for name, colour in (("Status", INK), ("StatusGood", GOOD),
+                             ("StatusWarn", WARN), ("StatusBad", BAD),
+                             ("StatusBusy", BUSY)):
+            style.configure(name + ".TLabel", background="white",
+                            foreground=colour, bordercolor=EDGE,
+                            relief="solid", borderwidth=1, padding=(8, 5))
+
+        style.configure("Horizontal.TProgressbar", background=BUSY,
+                        troughcolor="#e3e8ee", bordercolor=EDGE,
+                        lightcolor=BUSY, darkcolor=BUSY)
 
     def _frame(self, row: int, title: str) -> ttk.LabelFrame:
         frame = ttk.LabelFrame(self.root, text=title)
@@ -253,15 +383,18 @@ class App:
 
         self.v_gear = ttk.Label(frame, text="-", font=self.bold)
         self.v_gear.grid(row=1, column=0, columnspan=3, sticky="w", **PAD)
-        self.v_mode_note = self._value(frame, 2, 0, columnspan=3)
+        # Prose, so it is not in the mono font the numbers use.
+        self.v_mode_note = ttk.Label(frame, text="", style="Hint.TLabel")
+        self.v_mode_note.grid(row=2, column=0, columnspan=3, sticky="w",
+                              **PAD)
         self.v_steps = self._value(frame, 3, 0, columnspan=3)
 
     def _build_position(self, row: int) -> None:
         frame = self._frame(row, "position")
         self._value(frame, 0, 0, "az", font=self.bold)
         self._value(frame, 1, 0, "el", font=self.bold)
-        self.v_az = self._value(frame, 0, 1)
-        self.v_el = self._value(frame, 1, 1)
+        self.v_az = self._value(frame, 0, 1, font=self.big)
+        self.v_el = self._value(frame, 1, 1, font=self.big)
         self.v_zeroed = ttk.Label(frame, text="-", font=self.bold)
         self.v_zeroed.grid(row=0, column=2, rowspan=2, sticky="w", **PAD)
 
@@ -279,6 +412,53 @@ class App:
         self.b_zero_el = ttk.Button(zero, text="el", width=4,
                                     command=lambda: self._zero("EL"))
         self.b_zero_el.grid(row=0, column=5, padx=2)
+
+        # Priming an axis whose DIR input is sticky: out and back, so it ends
+        # up where it started. Needs a zero, like any other move, because the
+        # Pico refuses moves on an axis that has not been zeroed.
+        #
+        # One button per axis, like the zeros above: the sweep is for the axis
+        # with the sticky DIR input, and whichever axis is healthy should not
+        # be swung out and back to no purpose. The out leg is the negative
+        # one, so an axis sitting within a sweep of its travel minimum is
+        # refused - jog it up and press again.
+        cal = ttk.Frame(frame)
+        cal.grid(row=2, column=3, sticky="e", **PAD)
+        ttk.Label(
+            cal,
+            text="calibrate, -%g then +%g deg at %g deg/s:"
+                 % (gw.CAL_SWEEP_DEG, gw.CAL_SWEEP_DEG, gw.CAL_SPEED_DPS),
+        ).grid(row=0, column=0, padx=(0, 4))
+
+        self.b_cal = {}
+        for col, axis in enumerate(("AZ", "EL")):
+            button = ttk.Button(
+                cal, text=axis.lower(), width=4,
+                command=lambda a=axis: self._calibrate(a))
+            button.grid(row=0, column=1 + col, padx=2)
+            self.b_cal[axis] = button
+
+        # Jog: one axis, one direction, a step at a time. For telling an axis
+        # which way to turn without typing a move, and for repeating the same
+        # command while watching which way it actually goes.
+        jog = ttk.Frame(frame)
+        jog.grid(row=3, column=3, sticky="e", **PAD)
+        ttk.Label(jog, text="jog").grid(row=0, column=0, padx=(0, 4))
+        self.e_jog_step = self._entry(jog, 0, 1, "10")
+        ttk.Label(jog, text="deg at").grid(row=0, column=2, padx=4)
+        self.e_jog_speed = self._entry(jog, 0, 3, "15")
+        ttk.Label(jog, text="deg/s:").grid(row=0, column=4, padx=(4, 6))
+
+        self.b_jog = {}
+        col = 5
+        for axis in ("AZ", "EL"):
+            for sign, mark in ((-1, "-"), (1, "+")):
+                button = ttk.Button(
+                    jog, text=axis.lower() + " " + mark, width=5,
+                    command=lambda a=axis, s=sign: self._jog(a, s))
+                button.grid(row=0, column=col, padx=2)
+                self.b_jog[(axis, sign)] = button
+                col += 1
         frame.columnconfigure(3, weight=1)
 
     def _build_settings(self, row: int) -> None:
@@ -338,11 +518,19 @@ class App:
         # Two buttons, one box. "turn by" is the bench move that has always
         # been here; "go to" reads the same number as a destination.
         self.b_move_one = ttk.Button(one, text="turn by", width=9,
+                                     style="Go.TButton",
                                      command=self._move_one)
         self.b_move_one.grid(row=0, column=7, padx=(12, 2))
         self.b_goto_one = ttk.Button(one, text="go to", width=9,
+                                     style="Go.TButton",
                                      command=lambda: self._move_one(True))
         self.b_goto_one.grid(row=0, column=8, padx=2)
+        # The line this panel sends, so the command box and the window are
+        # not two things to learn.
+        ttk.Label(one, style="Hint.TLabel",
+                  text="typed:  move <az|el> <deg/s> <deg>"
+                       "   -   goto for a destination").grid(
+            row=1, column=0, columnspan=9, sticky="w", **PAD)
 
         # --- mode 2: both axes, each at its own speed ---
         both = ttk.Frame(holder)
@@ -358,11 +546,17 @@ class App:
                                               "45" if axis == "az" else "20")
             ttk.Label(both, text="deg").grid(row=line, column=5)
         self.b_move_both = ttk.Button(both, text="turn by", width=9,
+                                      style="Go.TButton",
                                       command=self._move_both)
         self.b_move_both.grid(row=0, column=6, rowspan=2, padx=(12, 2))
         self.b_goto_both = ttk.Button(both, text="go to", width=9,
+                                      style="Go.TButton",
                                       command=lambda: self._move_both(True))
         self.b_goto_both.grid(row=0, column=7, rowspan=2, padx=2)
+        ttk.Label(both, style="Hint.TLabel",
+                  text="typed:  move az <deg/s> <deg> el <deg/s> <deg>"
+                       "   -   one MOVE, both axes, either named first").grid(
+            row=2, column=0, columnspan=8, sticky="w", **PAD)
 
         # --- mode 3: a target stream the Pico chases ---
         track = ttk.Frame(holder)
@@ -397,7 +591,7 @@ class App:
         arm = ttk.Frame(track)
         arm.grid(row=2, column=0, columnspan=4, sticky="w")
         self.b_arm = ttk.Button(arm, text="ARM tracking", width=14,
-                                command=self._arm)
+                                style="Arm.TButton", command=self._arm)
         self.b_arm.grid(row=0, column=0, **PAD)
         self.b_disarm = ttk.Button(arm, text="disarm", width=10,
                                    command=self._disarm)
@@ -429,19 +623,23 @@ class App:
         log.columnconfigure(0, weight=1)
 
         self.log = tk.Text(log, height=12, width=52, font=self.mono,
-                           wrap="none", state="disabled")
+                           wrap="none", state="disabled",
+                           background="white", foreground=INK,
+                           relief="flat", borderwidth=0,
+                           highlightthickness=0, padx=6, pady=4,
+                           spacing1=1)
         self.log.grid(row=0, column=0, sticky="nsew")
         bar = ttk.Scrollbar(log, orient="vertical", command=self.log.yview)
         bar.grid(row=0, column=1, sticky="ns")
         self.log.configure(yscrollcommand=bar.set)
         # Sent and received are told apart by colour as well as by the
         # marker, because at a bench the pane is read at a glance.
-        self.log.tag_configure("out", foreground="#0a5")
-        self.log.tag_configure("in", foreground="#222")
-        self.log.tag_configure("note", foreground="#06c")
+        self.log.tag_configure("out", foreground=GOOD)
+        self.log.tag_configure("in", foreground=INK)
+        self.log.tag_configure("note", foreground=BUSY)
         # A line somebody typed, and the prompt's answer to it.
-        self.log.tag_configure("typed", foreground="#a0a")
-        self.log.tag_configure("said", foreground="#555")
+        self.log.tag_configure("typed", foreground=TYPED_INK)
+        self.log.tag_configure("said", foreground=MUTED)
 
         commands = ttk.LabelFrame(self.root,
                                   text="commands, and when to use them")
@@ -452,7 +650,9 @@ class App:
         # From command_help.py, which can be checked against the prompt's
         # real command table, so this panel lists the commands that exist.
         text = tk.Text(commands, height=12, width=52, font=self.mono,
-                       wrap="word", state="normal")
+                       wrap="word", state="normal", background="white",
+                       foreground=INK, relief="flat", borderwidth=0,
+                       highlightthickness=0, padx=6, pady=4)
         text.insert("1.0", command_help.text())
         text.configure(state="disabled")
         text.grid(row=0, column=0, sticky="nsew")
@@ -472,15 +672,16 @@ class App:
         self.e_cmd.bind("<Return>", self._typed)
         self.e_cmd.bind("<Up>", lambda _e: self._recall(-1))
         self.e_cmd.bind("<Down>", lambda _e: self._recall(1))
-        ttk.Label(typing, text="same as the prompt. The STOP button is the "
-                               "one that jumps the queue.").grid(
+        ttk.Label(typing, style="Hint.TLabel",
+                  text="same as the prompt. The STOP button is the one that "
+                       "jumps the queue.").grid(
             row=1, column=0, columnspan=2, sticky="w", pady=(2, 0))
 
         self._history: list[str] = []
         self._recall_at = 0
 
     def _build_stops(self, row: int) -> None:
-        frame = ttk.Frame(self.root)
+        frame = ttk.Frame(self.root, style="Canvas.TFrame")
         frame.grid(row=row, column=0, columnspan=2, sticky="ew", padx=6)
         frame.columnconfigure(0, weight=1)
         frame.columnconfigure(1, weight=1)
@@ -488,19 +689,30 @@ class App:
         # Classic tk rather than ttk so the colour actually applies, and
         # never disabled: these two are the way out of anything the other
         # buttons started.
+        #
+        # Amber and red, not grey and red: the ramped stop is the one to
+        # reach for first, and a grey button next to a red one does not look
+        # like a stop at all.
         self.b_stop = tk.Button(frame, text="STOP  (Esc)", height=2,
+                                bg="#e0a030", fg="#231700",
+                                activebackground="#edb44e",
+                                activeforeground="#231700",
+                                font=self.bold, relief="flat",
+                                borderwidth=0, highlightthickness=0,
                                 command=self._stop)
         self.b_stop.grid(row=0, column=0, sticky="ew", padx=(0, 3))
         self.b_estop = tk.Button(frame, text="E-STOP", height=2,
-                                 bg="#c00", fg="white",
-                                 activebackground="#e00",
+                                 bg="#c0271a", fg="white",
+                                 activebackground="#dc3a2c",
                                  activeforeground="white",
+                                 font=self.bold, relief="flat",
+                                 borderwidth=0, highlightthickness=0,
                                  command=self._estop)
         self.b_estop.grid(row=0, column=1, sticky="ew", padx=(3, 0))
 
     def _build_status(self, row: int) -> None:
         self.v_status = ttk.Label(self.root, text="starting...", anchor="w",
-                                  relief="sunken")
+                                  style="Status.TLabel")
         self.v_status.grid(row=row, column=0, columnspan=2, sticky="ew",
                            padx=6, pady=(4, 6))
 
@@ -564,6 +776,18 @@ class App:
             self.note(str(exc))
             return
         self.worker.zero(axis, deg)
+
+    def _calibrate(self, axis: str) -> None:
+        self.worker.calibrate(axis)
+
+    def _jog(self, axis: str, sign: int) -> None:
+        try:
+            step = self._read(self.e_jog_step, "jog step")
+            speed = self._read(self.e_jog_speed, "jog speed")
+        except motor.UsageError as exc:
+            self.note(str(exc))
+            return
+        self.worker.move(axis, speed, sign * step)
 
     def _move_one(self, absolute: bool = False) -> None:
         try:
@@ -734,6 +958,53 @@ class App:
         self._show_mode_panel(wanted)
         self.worker.set_gear(gear_wanted)
 
+    def _settle_mode(self, st: gw.State) -> None:
+        """Make the mode on screen and the Pico's gearing agree, once.
+
+        The window opens on MODE_DEFAULT, and a mode is a claim about the
+        gearing - while rule 1 says the screen shows the machine rather than
+        a wish. So the first reading that says what the Pico is counting
+        decides which of the two gives way:
+
+          - nothing is zeroed, so the gearing is free: ask for the gearing
+            the default mode wants. A gear change costs the zeros and there
+            are none to lose, which is why this one does not ask first.
+          - the axes ARE zeroed, so the Pico was being driven before this
+            window opened: follow it, and show the mode its gearing is.
+            Spending somebody's zero to honour a default they did not ask
+            for would be the window undoing their work.
+
+        Only the once, so that `gear off` typed later stands rather than
+        being argued with. What it leaves behind is a mode that no longer
+        matches the gearing, which `show` says out loud next to the gearing.
+        """
+        if self._mode_settled or st.gear is None:
+            return
+        self._mode_settled = True
+
+        wanted = self.mode.get()
+        if st.gear.geared == MODE_GEAR[wanted]:
+            return
+
+        if not st.zeroed:
+            word = "on" if MODE_GEAR[wanted] else "off"
+            # ZEROED is one flag for both axes, so "not zeroed" can still
+            # mean one axis was done. Said rather than guessed at.
+            self.note(f"mode {wanted}: switching to gear {word} while it is "
+                      f"free - nothing is zeroed. If you had just zeroed one "
+                      f"axis, that is gone too; zero again.")
+            self.worker.set_gear(MODE_GEAR[wanted])
+            return
+
+        follow = MODE_COMBINED if st.gear.geared else MODE_INDEPENDENT
+        self.mode.set(follow)
+        self._applied_mode = follow
+        self._show_mode_panel(follow)
+        self.note(f"the Pico is zeroed with gear "
+                  f"{'on' if st.gear.geared else 'off'}, so this is mode "
+                  f"{follow} - keeping that zero beats opening in mode "
+                  f"{MODE_DEFAULT}")
+
     def _show_mode_panel(self, mode: int) -> None:
         for value, panel in self.panels.items():
             if value == mode:
@@ -846,19 +1117,29 @@ class App:
         actually changed, and the mode buttons need to know the gearing.
         """
         self._state = st
+        self._settle_mode(st)
+        self._show_title(st)
         self.v_port.configure(text=st.port or "no port")
         self.v_who.configure(text=f"{st.target} {st.version}".strip() or "-")
         self.v_uptime.configure(text=f"up {_uptime(st.uptime_ms)}")
         self._show_heartbeat(st)
 
         if st.gear is None:
-            self.v_gear.configure(text="gearing unknown")
+            self.v_gear.configure(text="gearing unknown", foreground=MUTED)
             self.v_steps.configure(text="")
         else:
             on = st.gear.geared
-            self.v_gear.configure(
-                text="GEAR ON - final pair counted" if on
-                else "GEAR OFF - gearbox only")
+            text = ("GEAR ON - final pair counted" if on
+                    else "GEAR OFF - gearbox only")
+            # A mode is a claim about the gearing, and the two can come apart
+            # - `gear off` typed in the command box does not move the mode
+            # buttons. Said where the gearing is shown, because it changes
+            # what every angle in the window means.
+            agrees = on == MODE_GEAR[self.mode.get()]
+            if not agrees:
+                text += f"   - NOT the gearing mode {self.mode.get()} means"
+            self.v_gear.configure(text=text,
+                                  foreground=INK if agrees else BAD)
             self.v_steps.configure(
                 text=f"az {st.gear.az_steps_per_deg:8.3f} steps/deg"
                      f"    el {st.gear.el_steps_per_deg:8.3f} steps/deg")
@@ -878,7 +1159,7 @@ class App:
             # is the first thing anybody trips over.
             self.v_zeroed.configure(
                 text="zeroed" if st.pos.zeroed else "NOT ZEROED",
-                foreground="#0a5" if st.pos.zeroed else "#c00")
+                foreground=GOOD if st.pos.zeroed else BAD)
 
         self._show_settings(st)
         self._show_tracking(st)
@@ -887,7 +1168,24 @@ class App:
         status = st.describe()
         if st.moving:
             status += " - readings above are from before the move started"
-        self.v_status.configure(text=status)
+        # Colour as well as words: the status line gets read sideways, while
+        # somebody's hands are on the antenna.
+        if not st.connected:
+            style = "StatusBad.TLabel"
+        elif st.rebooted or not st.zeroed:
+            style = "StatusWarn.TLabel"
+        elif st.tracking or st.moving:
+            style = "StatusBusy.TLabel"
+        else:
+            style = "StatusGood.TLabel"
+        self.v_status.configure(text=status, style=style)
+
+    def _show_title(self, st: gw.State) -> None:
+        """Name the port in the title bar, for two windows side by side."""
+        title = WINDOW_TITLE + (f"  -  {st.port}" if st.port else "")
+        if title != self._title:
+            self._title = title
+            self.root.title(title)
 
     def _show_settings(self, st: gw.State) -> None:
         for axis in ("az", "el"):
@@ -957,7 +1255,8 @@ class App:
             widget.state(["!disabled"] if settled else ["disabled"])
 
         for widget in (self.b_move_one, self.b_move_both,
-                       self.b_goto_one, self.b_goto_both):
+                       self.b_goto_one, self.b_goto_both,
+                       *self.b_cal.values(), *self.b_jog.values()):
             widget.state(["!disabled"] if can_move else ["disabled"])
 
         # No switching modes mid-flight: `settled` is false while tracking,

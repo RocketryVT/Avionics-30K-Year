@@ -27,10 +27,26 @@ bool Stepper::pins_ok() const
 
 void Stepper::set_direction(bool positive)
 {
-    const bool reversing = (positive != dir_positive_);
+    // Measured against the PIN, not against dir_positive_. That belief goes
+    // stale two ways, and both of them flip the pin while this code thinks
+    // nothing is changing - so the reversal happens with 100 us of settle
+    // instead of the full pause:
+    //
+    //   a gear change    spec_ is a REFERENCE to g_az_spec / g_el_spec, which
+    //                    Act::SetGear replaces whole. Azimuth's invert_dir is
+    //                    true direct and false geared, so switching mode
+    //                    inverts what every level worked out here means,
+    //                    without dir_positive_ moving at all.
+    //   the PIN command  writes the pin straight, to hold a line steady for a
+    //                    multimeter, and tells this class nothing.
+    //
+    // gpio_get() on an output pin reads the pad back, so it cannot disagree
+    // with the world the way a remembered bool can.
+    const bool level     = dir_level(positive, spec_.invert_dir);
+    const bool reversing = (level != gpio_get(pin_dir_));
 
     dir_positive_ = positive;
-    gpio_put(pin_dir_, dir_level(positive, spec_.invert_dir));
+    gpio_put(pin_dir_, level);
 
     // The driver wants the direction settled well before the next pulse, and
     // a reversal is where that is tightest, so it gets an extra pause.

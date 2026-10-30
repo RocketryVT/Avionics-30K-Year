@@ -71,6 +71,27 @@ JOB_WAIT_S = 0.05
 # soon a stop reaches it.
 MOVE_SLICE_S = 0.2
 
+# The calibration sweep, run on one axis at a time: out this far, then back
+# the same amount.
+#
+# It is the priming move found at the bench on 27 Oct 2026. A driver whose
+# DIR input cannot change state cleanly from rest will take the first move
+# after a power-up in whichever direction it is stuck in, and only reverse
+# properly once it has turned once. Sweeping out and back leaves the axis
+# where it started, so it can be run before anything that matters.
+#
+# 45 degrees is far enough to see which way the axis actually went from
+# across the room, and 10 deg/s is slow enough to watch it the whole way.
+# The out leg goes NEGATIVE first, so the axis has to be at least this far
+# above its travel minimum or the Pico refuses the sweep: with elevation
+# zeroed on the horizon its -25 minimum means it has to be jogged up first.
+#
+# IT IS A WORKAROUND, NOT A FIX, and nothing in the CL57TE manual asks for
+# it: a healthy drive does not care which way it is asked to turn first.
+# Needing this is a sign that the axis's DIR input is damaged.
+CAL_SWEEP_DEG = 45.0
+CAL_SPEED_DPS = 10.0
+
 # How long the worker spends reading the port on each pass while tracking.
 #
 # Needed because nothing else reads it then: the usual poll is what drives
@@ -310,6 +331,16 @@ class MotorWorker(threading.Thread):
              absolute: bool = False) -> None:
         """Turn an axis. `absolute` reads the angle as where to end up."""
         self._jobs.put(_Job("move", (axis, speed_dps, delta_deg, absolute)))
+
+    def calibrate(self, axis: str) -> None:
+        """Sweep one axis out and back, to prime a sticky DIR input.
+
+        One job rather than two moves queued from the window, so that a leg
+        which is refused or stopped takes the other one with it. Queued
+        separately, the return leg would still run on its own, and an axis
+        that only did half the sweep would be displaced by the rest of it.
+        """
+        self._jobs.put(_Job("calibrate", (axis,)))
 
     def move_both(self, az_speed: float, az_delta: float, el_speed: float,
                   el_delta: float, absolute: bool = False) -> None:
@@ -561,6 +592,8 @@ class MotorWorker(threading.Thread):
             *halves, absolute = job.args
             self._await_move(
                 list(session.begin_move_both(*halves, absolute=absolute)))
+        elif job.name == "calibrate":
+            self._calibrate(session, *job.args)
         elif job.name == "gear":
             gear = session.set_gear(job.args[0])
             word = "on" if gear.geared else "off"
@@ -594,6 +627,35 @@ class MotorWorker(threading.Thread):
                 self._source.point(*job.args)
                 self._emit(EVENT_NOTE,
                            "pointing at az %.3f el %.3f" % job.args)
+
+    def _calibrate(self, session, axis: str) -> None:
+        """Turn one axis out and back, stopping if a leg does not finish.
+
+        One axis at a time, because only the axis whose DIR input is sticky
+        needs priming, and sweeping an axis that does not need it is travel
+        spent for nothing.
+
+        A refusal - an axis with no zero, a sweep that would cross a travel
+        limit - raises out of here and _handle_job reports it, so the return
+        leg never runs. What has to be checked by hand is a leg that STARTS
+        and is then cut short, by a stop or by the window closing: finishing
+        the sweep from there would not put the axis back, it would carry it
+        on past where it began.
+        """
+        name = axis.lower()
+        for leg, delta in (("out", -CAL_SWEEP_DEG), ("back", CAL_SWEEP_DEG)):
+            done = self._await_move(
+                [session.begin_move(axis, CAL_SPEED_DPS, delta)])
+            if done is None or not all(d.ok for d in done):
+                self._emit(
+                    EVENT_NOTE,
+                    name + " calibration stopped on the " + leg + " leg - "
+                    "the axis is NOT back where it started, check the "
+                    "position")
+                return
+        self._emit(EVENT_NOTE,
+                   name + " calibrated: swept " + str(CAL_SWEEP_DEG) +
+                   " deg each way, back where it started")
 
     def _handle_job(self, job: _Job) -> None:
         """Run one job, reporting what it ran into rather than dying.
