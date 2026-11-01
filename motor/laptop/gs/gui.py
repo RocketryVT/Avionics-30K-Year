@@ -545,15 +545,16 @@ class App:
         self.m3_source = tk.StringVar(value="manual")
         for col, (value, text) in enumerate((
             ("manual", "a direction I type"),
+            ("moving", "a moving target"),
             ("sim", "a simulated flight"),
         )):
             ttk.Radiobutton(picker, text=text, value=value,
                             variable=self.m3_source,
                             command=self._source_chosen).grid(
                 row=0, column=col, sticky="w", **PAD)
-        ttk.Label(picker, text="at").grid(row=0, column=2, padx=(12, 2))
-        self.m3_hz = self._entry(picker, 0, 3, "5", width=5)
-        ttk.Label(picker, text="targets/sec").grid(row=0, column=4, padx=2)
+        ttk.Label(picker, text="at").grid(row=0, column=3, padx=(12, 2))
+        self.m3_hz = self._entry(picker, 0, 4, "5", width=5)
+        ttk.Label(picker, text="targets/sec").grid(row=0, column=5, padx=2)
 
         aim = ttk.Frame(track)
         aim.grid(row=1, column=0, columnspan=4, sticky="w")
@@ -566,8 +567,22 @@ class App:
                                   command=self._point)
         self.b_point.grid(row=0, column=5, padx=(12, 2))
 
+        # For the moving target, which sets off from the direction above.
+        # A new target every time one is sent, so the chase can be watched
+        # replacing one with the next without anybody typing them.
+        moving = ttk.Frame(track)
+        moving.grid(row=2, column=0, columnspan=4, sticky="w")
+        ttk.Label(moving, text="moving at  az").grid(row=0, column=0, **PAD)
+        self.m3_az_rate = self._entry(moving, 0, 1, "3")
+        ttk.Label(moving, text="el").grid(row=0, column=2, padx=2)
+        self.m3_el_rate = self._entry(moving, 0, 3, "2")
+        ttk.Label(moving, text="deg/s, back and forth over").grid(
+            row=0, column=4, padx=2)
+        self.m3_span = self._entry(moving, 0, 5, "30", width=5)
+        ttk.Label(moving, text="deg").grid(row=0, column=6, padx=2)
+
         arm = ttk.Frame(track)
-        arm.grid(row=2, column=0, columnspan=4, sticky="w")
+        arm.grid(row=3, column=0, columnspan=4, sticky="w")
         self.b_arm = ttk.Button(arm, text="ARM tracking", width=14,
                                 style="Arm.TButton", command=self._arm)
         self.b_arm.grid(row=0, column=0, **PAD)
@@ -579,7 +594,7 @@ class App:
         # The readout. Three numbers per axis, because the interesting thing
         # while tracking is not where it is but how far behind it is.
         board = ttk.Frame(track)
-        board.grid(row=3, column=0, columnspan=4, sticky="w", pady=(4, 0))
+        board.grid(row=4, column=0, columnspan=4, sticky="w", pady=(4, 0))
         for col, head in enumerate(("", "target", "actual", "off by",
                                     "turning at")):
             self._value(board, 0, col, head, font=self.bold)
@@ -791,20 +806,35 @@ class App:
         self._refresh_enabled(self._state)
 
     def _arm(self) -> None:
+        kind = self.m3_source.get()
         try:
             hz = self._read(self.m3_hz, "targets/sec")
             az = self._read(self.m3_az, "azimuth")
             el = self._read(self.m3_el, "elevation")
+            # Read only for the moving target. No other source uses them, so
+            # a stray letter in one is no reason to refuse to arm.
+            motion = ((self._read(self.m3_az_rate, "azimuth rate"),
+                       self._read(self.m3_el_rate, "elevation rate"),
+                       self._read(self.m3_span, "back-and-forth angle"))
+                      if kind == "moving" else ())
         except motor.UsageError as exc:
             self.note(str(exc))
             return
         if hz <= 0:
             self.note("targets/sec must be more than zero")
             return
+        if motion and motion[2] <= 0:
+            self.note("back-and-forth angle must be more than zero")
+            return
 
-        kind = self.m3_source.get()
-        following = ("the direction you typed" if kind == "manual"
-                     else "a simulated flight")
+        if kind == "manual":
+            following = "the direction you typed"
+        elif kind == "moving":
+            following = ("a target that starts at az %g el %g and moves "
+                         "az %g, el %g deg/s, back and forth over %g deg,"
+                         % (az, el, *motion))
+        else:
+            following = "a simulated flight"
         if not self.confirm(
             "Arm tracking?",
             f"The motors will start moving on their own, following "
@@ -814,7 +844,7 @@ class App:
             "targets stop reaching it.",
         ):
             return
-        self.worker.start_tracking(kind, hz, az, el)
+        self.worker.start_tracking(kind, hz, az, el, *motion)
 
     def _disarm(self) -> None:
         self.worker.stop_tracking()
@@ -1241,10 +1271,15 @@ class App:
         # The direction boxes stay editable whenever the source is manual,
         # armed or not: you type where to point and THEN arm. (A disabled
         # ttk.Entry refuses even a programmatic write, so getting this the
-        # wrong way round locks the operator out of their own target.)
+        # wrong way round locks the operator out of their own target.) The
+        # moving target reads its boxes once, as it is armed, so they close
+        # while it runs rather than take an edit that would do nothing.
         manual = self.m3_source.get() == "manual"
+        moving = self.m3_source.get() == "moving" and not st.tracking
         for widget in (self.m3_az, self.m3_el):
-            widget.state(["!disabled"] if manual else ["disabled"])
+            widget.state(["!disabled"] if manual or moving else ["disabled"])
+        for widget in (self.m3_az_rate, self.m3_el_rate, self.m3_span):
+            widget.state(["!disabled"] if moving else ["disabled"])
         # Sending one, though, needs something armed to send it to.
         self.b_point.state(["!disabled"] if manual and st.tracking
                            else ["disabled"])

@@ -360,14 +360,19 @@ class MotorWorker(threading.Thread):
     # --- tracking ----------------------------------------------------------
 
     def start_tracking(self, kind: str, hz: float, az_deg: float = 0.0,
-                       el_deg: float = 0.0) -> None:
+                       el_deg: float = 0.0, az_rate_dps: float = 0.0,
+                       el_rate_dps: float = 0.0,
+                       span_deg: float = 30.0) -> None:
         """Arm tracking and start sending targets.
 
-        `kind` is "manual" or "sim". The source is built here, on the
-        worker's thread, because that is the only thread allowed to touch it
-        afterwards.
+        `kind` is "manual", "moving" or "sim". The rates and span are only
+        used by "moving", which sets off from az_deg/el_deg. The source is
+        built here, on the worker's thread, because that is the only thread
+        allowed to touch it afterwards.
         """
-        self._jobs.put(_Job("track_start", (kind, hz, az_deg, el_deg)))
+        self._jobs.put(_Job("track_start", (kind, hz, az_deg, el_deg,
+                                            az_rate_dps, el_rate_dps,
+                                            span_deg)))
 
     def stop_tracking(self) -> None:
         self._jobs.put(_Job("track_stop"))
@@ -682,11 +687,15 @@ class MotorWorker(threading.Thread):
         finally:
             self._set_state(working=False)
 
-    def _start_tracking(self, session, kind, hz, az_deg, el_deg) -> None:
+    def _start_tracking(self, session, kind, hz, az_deg, el_deg,
+                        az_rate_dps, el_rate_dps, span_deg) -> None:
         self._stop_tracking(None)
 
         if kind == "manual":
             source = tg.ManualSource(az_deg, el_deg, clock=self._clock)
+        elif kind == "moving":
+            source = tg.MovingSource(az_deg, el_deg, az_rate_dps,
+                                     el_rate_dps, span_deg)
         elif kind == "sim":
             source = tg.SimSource.rocket(hz=hz)
         else:

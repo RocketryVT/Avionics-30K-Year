@@ -255,7 +255,12 @@ anything is bolted up.
 radio and the geometry out of the picture, so what is left under test is the
 chase loop.
 
-Three sources, one interface, in `targets.py`. The third is `LiveSource`,
+The window's mode 3 also has **a moving target**: it sets off from the
+direction typed, moves each axis at the rate given, and turns back every so
+many degrees. Every target it sends replaces the last, so it is the way to
+watch the chase follow something that never stops changing, without typing.
+
+Four sources, one interface, in `targets.py`. The fourth is `LiveSource`,
 which is where the lat/lon/alt-to-az/el module plugs in when it is ready —
 hand it a callable returning `(az_deg, el_deg, fix_time)` and it works. It
 wants **absolute** angles, not changes; `DeltaSource` is there if that cannot
