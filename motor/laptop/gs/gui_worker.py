@@ -85,7 +85,7 @@ MOVE_SLICE_S = 0.2
 # across the room, and 10 deg/s is slow enough to watch it the whole way.
 # The out leg goes NEGATIVE first, so the axis has to be at least this far
 # above its travel minimum or the Pico refuses the sweep: with elevation
-# zeroed on the horizon its -25 minimum means it has to be jogged up first.
+# zeroed on the horizon its -25 minimum means it has to be moved up first.
 CAL_SWEEP_DEG = 45.0
 CAL_SPEED_DPS = 10.0
 

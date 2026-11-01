@@ -421,7 +421,7 @@ class App:
         # One button per axis, like the zeros above, so only the axis being
         # checked is swung out and back. The out leg is the negative one, so
         # an axis sitting within a sweep of its travel minimum is refused -
-        # jog it up and press again.
+        # move it up and press again.
         cal = ttk.Frame(frame)
         cal.grid(row=2, column=3, sticky="e", **PAD)
         ttk.Label(
@@ -437,28 +437,6 @@ class App:
                 command=lambda a=axis: self._calibrate(a))
             button.grid(row=0, column=1 + col, padx=2)
             self.b_cal[axis] = button
-
-        # Jog: one axis, one direction, a step at a time. For telling an axis
-        # which way to turn without typing a move, and for repeating the same
-        # command while watching which way it actually goes.
-        jog = ttk.Frame(frame)
-        jog.grid(row=3, column=3, sticky="e", **PAD)
-        ttk.Label(jog, text="jog").grid(row=0, column=0, padx=(0, 4))
-        self.e_jog_step = self._entry(jog, 0, 1, "10")
-        ttk.Label(jog, text="deg at").grid(row=0, column=2, padx=4)
-        self.e_jog_speed = self._entry(jog, 0, 3, "15")
-        ttk.Label(jog, text="deg/s:").grid(row=0, column=4, padx=(4, 6))
-
-        self.b_jog = {}
-        col = 5
-        for axis in ("AZ", "EL"):
-            for sign, mark in ((-1, "-"), (1, "+")):
-                button = ttk.Button(
-                    jog, text=axis.lower() + " " + mark, width=5,
-                    command=lambda a=axis, s=sign: self._jog(a, s))
-                button.grid(row=0, column=col, padx=2)
-                self.b_jog[(axis, sign)] = button
-                col += 1
         frame.columnconfigure(3, weight=1)
 
     def _build_settings(self, row: int) -> None:
@@ -779,15 +757,6 @@ class App:
 
     def _calibrate(self, axis: str) -> None:
         self.worker.calibrate(axis)
-
-    def _jog(self, axis: str, sign: int) -> None:
-        try:
-            step = self._read(self.e_jog_step, "jog step")
-            speed = self._read(self.e_jog_speed, "jog speed")
-        except motor.UsageError as exc:
-            self.note(str(exc))
-            return
-        self.worker.move(axis, speed, sign * step)
 
     def _move_one(self, absolute: bool = False) -> None:
         try:
@@ -1256,7 +1225,7 @@ class App:
 
         for widget in (self.b_move_one, self.b_move_both,
                        self.b_goto_one, self.b_goto_both,
-                       *self.b_cal.values(), *self.b_jog.values()):
+                       *self.b_cal.values()):
             widget.state(["!disabled"] if can_move else ["disabled"])
 
         # No switching modes mid-flight: `settled` is false while tracking,
