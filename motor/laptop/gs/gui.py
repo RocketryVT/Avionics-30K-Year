@@ -413,15 +413,15 @@ class App:
                                     command=lambda: self._zero("EL"))
         self.b_zero_el.grid(row=0, column=5, padx=2)
 
-        # Priming an axis whose DIR input is sticky: out and back, so it ends
-        # up where it started. Needs a zero, like any other move, because the
-        # Pico refuses moves on an axis that has not been zeroed.
+        # Out and back on one axis, so it should end up exactly where it
+        # started; if it does not, one of its lines is dropping pulses. Needs
+        # a zero, like any other move, because the Pico refuses moves on an
+        # axis that has not been zeroed.
         #
-        # One button per axis, like the zeros above: the sweep is for the axis
-        # with the sticky DIR input, and whichever axis is healthy should not
-        # be swung out and back to no purpose. The out leg is the negative
-        # one, so an axis sitting within a sweep of its travel minimum is
-        # refused - jog it up and press again.
+        # One button per axis, like the zeros above, so only the axis being
+        # checked is swung out and back. The out leg is the negative one, so
+        # an axis sitting within a sweep of its travel minimum is refused -
+        # jog it up and press again.
         cal = ttk.Frame(frame)
         cal.grid(row=2, column=3, sticky="e", **PAD)
         ttk.Label(

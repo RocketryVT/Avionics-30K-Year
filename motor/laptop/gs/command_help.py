@@ -229,8 +229,8 @@ ENTRIES = [
         usage="pin <gpio> <0|1>",
         what="Holds one pin high or low. GP4-7 and GP12-15 only.",
         when="Checking wiring with a multimeter, before trusting any motor. "
-             "Driving a step pin costs that axis its zero, because the "
-             "driver takes a step nobody counted.",
+             "Driving any motor pin (GP4-7) costs that axis its zero: each "
+             "one is a step line, so the driver takes a step nobody counted.",
     ),
     Entry(
         command="verbose",

@@ -1,5 +1,5 @@
-// Driving one stepper axis: two pins, a direction, and a count of where we
-// think the axis is.
+// Driving one stepper axis: two pins, one for each way it turns, and a count
+// of where we think the axis is.
 //
 // This is the only motor code that touches the pins. The arithmetic - how
 // many steps, how long between them - is in motion_profile, so what is left
@@ -26,32 +26,32 @@
 
 class Stepper {
 public:
-    Stepper(const AxisSpec &spec, uint pin_pul, uint pin_dir)
-        : spec_(spec), pin_pul_(pin_pul), pin_dir_(pin_dir)
+    Stepper(const AxisSpec &spec, uint pin_cw, uint pin_ccw)
+        : spec_(spec), pin_cw_(pin_cw), pin_ccw_(pin_ccw)
     {
     }
 
-    // Claim the two pins as outputs and park them at their idle levels.
+    // Claim the two pins as outputs and park them HIGH, at rest.
     //
     // Push-pull outputs, always - never open-drain, never inputs. See the
     // active-low note in pins.hpp.
     void init();
 
-    // Read the two pins back and check they are at the levels init() set.
-    // Catches a pin that was never configured, or one held down by something
-    // external. It cannot tell whether a driver is plugged in.
+    // Read the two pins back and check they are both at rest. Catches a pin
+    // that was never configured, or one held down by something external. It
+    // cannot tell whether a driver is plugged in.
     bool pins_ok() const;
 
     // --- running a move ----------------------------------------------------
 
     // Starting a move that plan_move() has approved takes two calls. aim()
-    // sets the direction pin and waits for the driver to notice it. begin()
-    // then makes the first step due straight away. Neither is called while
-    // the axis is moving.
+    // picks the line the pulses go out on, and puts back at rest any line
+    // the PIN command left LOW. begin() then makes the first step due
+    // straight away. Neither is called while the axis is moving.
     //
     // They are separate so a two-axis move can aim both axes before beginning
-    // either. Otherwise the first axis's opening step would sit waiting while
-    // the second axis's direction settled.
+    // either. Putting a line back means a pause, and otherwise the first
+    // axis's opening step would sit waiting through the second axis's.
     void aim(const Move &m);
     void begin(const Move &m, uint16_t id);
 
@@ -65,9 +65,9 @@ public:
 
     // --- chasing a target --------------------------------------------------
 
-    // Start chasing from idle, reasserting DIR for the current spec. The
-    // target begins at wherever the axis is, so arming alone emits no steps;
-    // it waits for a target.
+    // Start chasing from idle, with both lines at rest. The target begins at
+    // wherever the axis is, so arming alone emits no steps; it waits for a
+    // target.
     void arm_chase();
 
     // Stop chasing and come to rest, ramping down rather than cutting the
@@ -140,10 +140,12 @@ private:
         Braking,   // was chasing, now ramping to a stop
     };
 
-    // Point the axis the right way and wait for the driver to notice.
-    void set_direction(bool positive);
+    // Put both lines back at rest before pulses start, in case the PIN
+    // command left one LOW. Only then does it wait, for that line's driver
+    // input to let go.
+    void release_lines();
 
-    // Send one pulse and count it.
+    // Send one pulse on the line for dir_positive_, and count it.
     void step();
 
     // One tick of the chase or brake loop. Shared, because braking is just
@@ -154,14 +156,15 @@ private:
     float since_last_chase(absolute_time_t now);
 
     const AxisSpec &spec_;
-    uint pin_pul_;
-    uint pin_dir_;
+    uint pin_cw_;
+    uint pin_ccw_;
 
     int32_t pos_steps_ = 0;
     bool zeroed_       = false;
 
-    // Logical direction used to count steps. init(), aim() and arm_chase()
-    // synchronize DIR before pulses; an idle PIN write can disturb the pad.
+    // Which way the next pulse turns the axis: which line it goes out on, and
+    // which way it is counted. Set by aim() for a planned move and by
+    // chase_tick() while chasing.
     bool dir_positive_ = true;
 
     // --- the move in progress ---------------------------------------------

@@ -7,7 +7,7 @@ over USB.
 
 ```
 laptop                                 Pico                        drivers + motors
-py -m gs.motor  --- text commands -->  gs_motor  --- step + dir -->  CL57TE x2
+py -m gs.motor  --- text commands -->  gs_motor  --- cw + ccw -->    CL57TE x2
                 <-- text replies ----
 ```
 
@@ -60,9 +60,12 @@ py -m gs.motor  --- text commands -->  gs_motor  --- step + dir -->  CL57TE x2
    `py -m pip install -e laptop`
 2. **Build the Pico program** (WSL, from this folder):
    `cmake -S firmware -B ~/build/gs -G Ninja` once, then `ninja -C ~/build/gs`
-3. **Flash it:** hold BOOTSEL, plug the Pico in, and drag
+3. **Set SW7 ON on both drivers**, with them powered off. That is CW/CCW
+   pulse mode, the only one this program drives. With SW7 off, moves one
+   way go nowhere while the count says they went. See `pins.hpp`.
+4. **Flash it:** hold BOOTSEL, plug the Pico in, and drag
    `firmware/uf2/gs_motor.uf2` onto the drive that appears.
-4. **Drive the motors:** `py -m gs.motor --log`, then at the prompt:
+5. **Drive the motors:** `py -m gs.motor --log`, then at the prompt:
 
    ```
    motor> zero
@@ -97,7 +100,7 @@ New machine? Do `docs/SETUP.md` first.
 | `defaults` | Back to the numbers in `motor_config.hpp` (then `save` to keep that) |
 | `gear [on\|off]` | Whether the final gear pair is counted. See **Gear modes** |
 | `track [on\|off]` | Arm or disarm chasing a target. See **Tracking** |
-| `pin <gpio> <0\|1>` | Hold a pin high or low, for a multimeter (GP4-7, GP12-15). A step pin (GP4, GP6) costs that axis its zero |
+| `pin <gpio> <0\|1>` | Hold a pin high or low, for a multimeter (GP4-7, GP12-15). Any motor pin (GP4-7) is a step line, so it costs that axis its zero |
 | `sweep [axis=az] [angle=45] [speeds=1,5,90] [pause]` | One angle at each speed in turn |
 | `random [axis=az] [count=10] [speed=5] [seed=N] [pause]` | Random angles inside the limits |
 | `true [row] <deg>` | Record what the protractor reads, for the last row or the one given |
