@@ -56,6 +56,14 @@
 #include "settings.hpp"
 #include "settings_flash.hpp"
 #include "stepper.hpp"
+#include "pointing.hpp"
+#include "motor_interface.hpp"
+
+#ifdef GS_ENABLE_REPLAY
+#include "replay_config.hpp"
+#include "replay_data.hpp"
+#include "replay_position.hpp"
+#endif
 
 constexpr uint32_t HEARTBEAT_PERIOD_MS = 5000;
 
@@ -80,8 +88,8 @@ static AxisSpec g_el_spec = EL_SPEC;
 // What a restart would come back with, so the laptop can be told whether the
 // settings in force have been saved. The gear mode is saved with them.
 static GearMode g_boot_gear = GearMode::Direct;
-static AxisSpec g_boot_az   = AZ_SPEC;
-static AxisSpec g_boot_el   = EL_SPEC;
+static AxisSpec g_boot_az = AZ_SPEC;
+static AxisSpec g_boot_el = EL_SPEC;
 
 // True once TRACK ON was accepted, and when the last target arrived. If
 // targets stop coming, the watchdog in the main loop brings the axes to rest:
@@ -89,6 +97,13 @@ static AxisSpec g_boot_el   = EL_SPEC;
 // minutes stale.
 static bool g_tracking = false;
 static absolute_time_t g_last_target = {};
+
+#ifdef GS_ENABLE_REPLAY
+static bool g_replay_running = false;
+static absolute_time_t g_replay_start = {};
+static absolute_time_t g_next_replay_update = {};
+static uint16_t g_replay_command_id = 1;
+#endif
 
 static Stepper g_az(g_az_spec, PIN_AZ_PUL, PIN_AZ_DIR);
 static Stepper g_el(g_el_spec, PIN_EL_PUL, PIN_EL_DIR);
@@ -100,7 +115,8 @@ static char g_out[MAX_REPLY_LEN];
 
 static void send(size_t n)
 {
-    if (n > 0) {
+    if (n > 0)
+    {
         fputs(g_out, stdout);
     }
 }
@@ -114,10 +130,12 @@ static void send(size_t n)
 // stale reading on screen beats a stalled step loop.
 static void send_if_room(size_t n)
 {
-    if (n == 0) {
+    if (n == 0)
+    {
         return;
     }
-    if (!tud_cdc_connected() || tud_cdc_write_available() < n) {
+    if (!tud_cdc_connected() || tud_cdc_write_available() < n)
+    {
         return;
     }
     fputs(g_out, stdout);
@@ -131,23 +149,28 @@ static void send_if_room(size_t n)
 // port nobody is reading.
 static void wait_for_usb_forever()
 {
-    while (!stdio_usb_connected()) {
+    while (!stdio_usb_connected())
+    {
         sleep_ms(50);
     }
-    sleep_ms(200);  // let the laptop finish opening before the first line
+    sleep_ms(200); // let the laptop finish opening before the first line
 }
 
 // Millidegrees as degrees with three decimals, for the banner.
 static void print_mdeg(int32_t mdeg)
 {
     const long whole = mdeg / 1000;
-    long frac        = mdeg % 1000;
-    if (frac < 0) {
+    long frac = mdeg % 1000;
+    if (frac < 0)
+    {
         frac = -frac;
     }
-    if (mdeg < 0 && whole == 0) {
+    if (mdeg < 0 && whole == 0)
+    {
         printf("-0.%03ld", frac);
-    } else {
+    }
+    else
+    {
         printf("%ld.%03ld", whole, frac);
     }
 }
@@ -162,7 +185,8 @@ static void print_steps_per_deg(const AxisSpec &axis)
 // Never die quietly, and never carry on regardless.
 static void fatal_forever(const char *reason)
 {
-    for (;;) {
+    for (;;)
+    {
         printf("[fatal] %s\n", reason);
         sleep_ms(2000);
     }
@@ -175,16 +199,19 @@ static LoadResult read_boot_settings()
     // Seeded with direct mode and its numbers, so a record that is blank,
     // corrupt or stale leaves the machine counting the gearbox alone.
     g_boot_gear = GearMode::Direct;
-    g_boot_az   = AZ_SPEC;
-    g_boot_el   = EL_SPEC;
+    g_boot_az = AZ_SPEC;
+    g_boot_el = EL_SPEC;
     return load_settings(&g_boot_gear, &g_boot_az, &g_boot_el);
 }
 
 static const char *settings_note(LoadResult r)
 {
-    switch (r) {
-    case LoadResult::Ok:      return "saved ones in use";
-    case LoadResult::Blank:   return "built in";
+    switch (r)
+    {
+    case LoadResult::Ok:
+        return "saved ones in use";
+    case LoadResult::Blank:
+        return "built in";
     case LoadResult::Stale:
         return "built in - saved ones ignored, motor_config.hpp has changed";
     case LoadResult::Corrupt:
@@ -258,25 +285,25 @@ static void print_banner(LoadResult loaded)
 static MachineState snapshot()
 {
     MachineState s;
-    s.busy         = g_az.busy() || g_el.busy();
-    s.az_zeroed    = g_az.zeroed();
-    s.el_zeroed    = g_el.zeroed();
+    s.busy = g_az.busy() || g_el.busy();
+    s.az_zeroed = g_az.zeroed();
+    s.el_zeroed = g_el.zeroed();
     s.az_pos_steps = g_az.pos_steps();
     s.el_pos_steps = g_el.pos_steps();
-    s.gear         = g_gear;
-    s.tracking     = g_tracking;
+    s.gear = g_gear;
+    s.tracking = g_tracking;
     s.az_target_steps = g_az.target_steps();
     s.el_target_steps = g_el.target_steps();
-    s.az_mdps      = g_az.velocity_mdps();
-    s.el_mdps      = g_el.velocity_mdps();
-    s.az_spec      = g_az_spec;
-    s.el_spec      = g_el_spec;
+    s.az_mdps = g_az.velocity_mdps();
+    s.el_mdps = g_el.velocity_mdps();
+    s.az_spec = g_az_spec;
+    s.el_spec = g_el_spec;
     s.settings_unsaved = g_gear != g_boot_gear ||
                          !same_settings(g_az_spec, g_boot_az) ||
                          !same_settings(g_el_spec, g_boot_el);
-    s.uptime_ms    = to_ms_since_boot(get_absolute_time());
-    s.target       = GS_TARGET_NAME;
-    s.version      = GS_VERSION;
+    s.uptime_ms = to_ms_since_boot(get_absolute_time());
+    s.target = GS_TARGET_NAME;
+    s.version = GS_VERSION;
     return s;
 }
 
@@ -288,7 +315,8 @@ static void set_test_pin(const Decision &d)
     // level, and gpio_init() would make it an input again for a moment on the
     // way past - letting it float, which pins.hpp warns against. So the level
     // is written straight to it instead.
-    if (pin_is_spare(d.gpio)) {
+    if (pin_is_spare(d.gpio))
+    {
         gpio_init(d.gpio);
         gpio_set_dir(d.gpio, GPIO_OUT);
     }
@@ -298,23 +326,28 @@ static void set_test_pin(const Decision &d)
 // Carry out what decide() asked for. Nothing here chooses anything.
 static void apply(const Decision &d)
 {
-    switch (d.act) {
+    switch (d.act)
+    {
     case Act::Nothing:
         break;
     case Act::StartMove:
         // Every axis about to move is aimed before any of them begins. Each
         // aim waits for its driver to see the direction pin, so doing them
         // all first means both axes of a two-axis move set off together.
-        if (d.move_az) {
+        if (d.move_az)
+        {
             g_az.aim(d.az_move);
         }
-        if (d.move_el) {
+        if (d.move_el)
+        {
             g_el.aim(d.el_move);
         }
-        if (d.move_az) {
+        if (d.move_az)
+        {
             g_az.begin(d.az_move, d.id);
         }
-        if (d.move_el) {
+        if (d.move_el)
+        {
             g_el.begin(d.el_move, d.id);
         }
         break;
@@ -331,10 +364,12 @@ static void apply(const Decision &d)
         g_el.estop();
         break;
     case Act::SetZero:
-        if (d.zero_az) {
+        if (d.zero_az)
+        {
             g_az.set_pos_steps(d.az_steps);
         }
-        if (d.zero_el) {
+        if (d.zero_el)
+        {
             g_el.set_pos_steps(d.el_steps);
         }
         break;
@@ -346,16 +381,22 @@ static void apply(const Decision &d)
         g_el_spec = d.el_spec;
         break;
     case Act::SaveSettings:
-        break;  // already done in handle(), before the reply
+        break; // already done in handle(), before the reply
     case Act::SetTrack:
         g_tracking = d.track_on;
-        if (d.track_on) {
+#ifdef GS_ENABLE_REPLAY
+        g_replay_running = false;
+#endif
+        if (d.track_on)
+        {
             g_az.arm_chase();
             g_el.arm_chase();
             // Counted from here, so arming does not immediately look like a
             // dropout to the watchdog.
             g_last_target = get_absolute_time();
-        } else {
+        }
+        else
+        {
             g_az.disarm_chase();
             g_el.disarm_chase();
         }
@@ -368,7 +409,7 @@ static void apply(const Decision &d)
     case Act::SetGear:
         // Both specs are replaced whole, not just their settable numbers:
         // the mode decides steps per degree and every speed number too.
-        g_gear    = d.gear;
+        g_gear = d.gear;
         g_az_spec = d.az_spec;
         g_el_spec = d.el_spec;
         // A degree means something different now, so any target in hand is
@@ -384,10 +425,12 @@ static void apply(const Decision &d)
     // step pin driven by hand) or when the drive train changes under it (a
     // gear mode switch). Either way it has to be re-zeroed before it may
     // move again.
-    if (d.clear_az_zero) {
+    if (d.clear_az_zero)
+    {
         g_az.clear_zero();
     }
-    if (d.clear_el_zero) {
+    if (d.clear_el_zero)
+    {
         g_el.clear_zero();
     }
 }
@@ -400,11 +443,13 @@ static void handle(const Command &c)
     // done before the reply rather than after. It is checked by reading flash
     // back, the same way the next startup will, so the ACK means a restart
     // will come back with these settings.
-    if (d.act == Act::SaveSettings) {
+    if (d.act == Act::SaveSettings)
+    {
         save_settings(g_gear, g_az_spec, g_el_spec);
         read_boot_settings();
         if (g_boot_gear != g_gear || !same_settings(g_boot_az, g_az_spec) ||
-            !same_settings(g_boot_el, g_el_spec)) {
+            !same_settings(g_boot_el, g_el_spec))
+        {
             send(format_err(g_out, sizeof(g_out), c.id, ErrCode::Flash, ""));
             return;
         }
@@ -412,7 +457,8 @@ static void handle(const Command &c)
 
     // Lines first, then the action. A move's ACK and PLANs have to be on the
     // wire before its first pulse.
-    for (size_t i = 0; i < d.line_count; i++) {
+    for (size_t i = 0; i < d.line_count; i++)
+    {
         fputs(d.lines[i], stdout);
     }
     apply(d);
@@ -421,20 +467,102 @@ static void handle(const Command &c)
 // Read whatever has arrived without waiting for more.
 static void poll_input()
 {
-    for (;;) {
+    for (;;)
+    {
         const int ch = getchar_timeout_us(0);
-        if (ch < 0) {
+        if (ch < 0)
+        {
             return;
         }
 
         const LineReader::Result r = g_reader.feed(static_cast<char>(ch));
-        if (r == LineReader::Result::Line) {
+        if (r == LineReader::Result::Line)
+        {
             handle(parse_command(g_reader.line()));
-        } else if (r == LineReader::Result::TooLong) {
+        }
+        else if (r == LineReader::Result::TooLong)
+        {
             send(format_err(g_out, sizeof(g_out), 0, ErrCode::TooLong, ""));
         }
     }
 }
+
+static void submitRocketPosition(
+    const GPSPosition &rocket,
+    const GPSPosition &station,
+    uint16_t commandId)
+{
+    auto angles = calculatePointingAngles(rocket, station);
+
+    if (!angles.has_value())
+    {
+        return;
+    }
+
+    auto command = makeMotorTarget(*angles, commandId);
+
+    if (!command.has_value())
+    {
+        return;
+    }
+
+    handle(*command);
+}
+
+#ifdef GS_ENABLE_REPLAY
+static void pollReplay(absolute_time_t now)
+{
+    // Stop supplying positions whenever tracking is disarmed.
+    if (!g_tracking)
+    {
+        g_replay_running = false;
+        return;
+    }
+
+    // Both references must be configured before replay can start.
+    if (!REPLAY_STATION || !REPLAY_GEOID_SEPARATION_M)
+    {
+        return;
+    }
+
+    // The first call after arming starts the simulation clock.
+    if (!g_replay_running)
+    {
+        g_replay_start = now;
+        g_next_replay_update = now;
+        g_replay_command_id = 1;
+        g_replay_running = true;
+    }
+
+    // Return immediately if the next update is still in the future.
+    if (absolute_time_diff_us(now, g_next_replay_update) > 0)
+    {
+        return;
+    }
+
+    g_next_replay_update =
+        delayed_by_ms(now, REPLAY_UPDATE_PERIOD_MS);
+
+    const double elapsedSeconds =
+        absolute_time_diff_us(g_replay_start, now) / 1'000'000.0;
+
+    const auto rocket = replayPositionAt(
+        elapsedSeconds,
+        *REPLAY_GEOID_SEPARATION_M);
+
+    // When the data ends, stop sending targets.
+    // The existing tracking watchdog will bring the motors to rest.
+    if (!rocket)
+    {
+        return;
+    }
+
+    submitRocketPosition(
+        *rocket,
+        *REPLAY_STATION,
+        g_replay_command_id++);
+}
+#endif
 
 // What the TRK stream says. Built from the steppers rather than from a
 // snapshot, because it is sent from the loop rather than in answer to a
@@ -442,13 +570,13 @@ static void poll_input()
 static TrackReport track_report()
 {
     TrackReport r{};
-    r.armed          = g_tracking;
+    r.armed = g_tracking;
     r.az_target_mdeg = steps_to_mdeg(g_az_spec, g_az.target_steps());
-    r.az_pos_mdeg    = g_az.pos_mdeg();
-    r.az_mdps        = g_az.velocity_mdps();
+    r.az_pos_mdeg = g_az.pos_mdeg();
+    r.az_mdps = g_az.velocity_mdps();
     r.el_target_mdeg = steps_to_mdeg(g_el_spec, g_el.target_steps());
-    r.el_pos_mdeg    = g_el.pos_mdeg();
-    r.el_mdps        = g_el.velocity_mdps();
+    r.el_pos_mdeg = g_el.pos_mdeg();
+    r.el_mdps = g_el.velocity_mdps();
     return r;
 }
 
@@ -470,7 +598,7 @@ int main()
     const bool settings_free = settings_sector_is_free();
     const LoadResult loaded = settings_free ? read_boot_settings()
                                             : LoadResult::Blank;
-    g_gear    = g_boot_gear;
+    g_gear = g_boot_gear;
     g_az_spec = g_boot_az;
     g_el_spec = g_boot_el;
 
@@ -482,14 +610,17 @@ int main()
 
     printf("=== gs_pico_link %s %s ===\n", GS_TARGET_NAME, GS_VERSION);
 
-    if (!g_az.pins_ok()) {
+    if (!g_az.pins_ok())
+    {
         fatal_forever("azimuth pins did not read back their startup levels");
     }
-    if (!g_el.pins_ok()) {
+    if (!g_el.pins_ok())
+    {
         fatal_forever("elevation pins did not read back their startup levels");
     }
 
-    if (!settings_free) {
+    if (!settings_free)
+    {
         fatal_forever("the program has grown into the settings sector");
     }
 
@@ -499,24 +630,28 @@ int main()
         delayed_by_ms(get_absolute_time(), HEARTBEAT_PERIOD_MS);
     absolute_time_t next_track_report = next_heartbeat;
 
-    for (;;) {
+    for (;;)
+    {
         const absolute_time_t now = get_absolute_time();
 
         const bool az_moving = g_az.tick(now);
         const bool el_moving = g_el.tick(now);
-        const bool moving    = az_moving || el_moving;
+        const bool moving = az_moving || el_moving;
 
         // Report completed plans before accepting another command. TRACK ON
         // or a new MOVE may replace a stepper's move ID, so accepting one
         // between the last pulse and DONE would erase the old report. The
         // pending ID also catches a one-step move, whose first tick finishes
         // it without ever returning true for moving.
-        if (!moving) {
-            if (!g_az.moving() && g_az.move_id() != 0) {
+        if (!moving)
+        {
+            if (!g_az.moving() && g_az.move_id() != 0)
+            {
                 report_done(g_az, AxisId::Az);
                 g_az.clear_move_id();
             }
-            if (!g_el.moving() && g_el.move_id() != 0) {
+            if (!g_el.moving() && g_el.move_id() != 0)
+            {
                 report_done(g_el, AxisId::El);
                 g_el.clear_move_id();
             }
@@ -529,7 +664,8 @@ int main()
         // dropout or a closed laptop looks like from here.
         if (g_tracking &&
             absolute_time_diff_us(g_last_target, now) >
-                static_cast<int64_t>(TRACK_TIMEOUT_MS) * 1000) {
+                static_cast<int64_t>(TRACK_TIMEOUT_MS) * 1000)
+        {
             g_tracking = false;
             g_az.disarm_chase();
             g_el.disarm_chase();
@@ -543,9 +679,14 @@ int main()
                 static_cast<unsigned long>(TRACK_TIMEOUT_MS))));
         }
 
+#ifdef GS_ENABLE_REPLAY
+        pollReplay(now);
+#endif
+
         // The tracking stream. Sent through send_if_room() because an axis
         // is turning - see the rule at the top of this file.
-        if (g_tracking && absolute_time_diff_us(now, next_track_report) <= 0) {
+        if (g_tracking && absolute_time_diff_us(now, next_track_report) <= 0)
+        {
             next_track_report = delayed_by_ms(now, TRACK_REPORT_MS);
             send_if_room(format_trk(g_out, sizeof(g_out), 0, track_report()));
         }
@@ -557,9 +698,12 @@ int main()
         // Either way the deadline is pushed along rather than left in the
         // past, so the heartbeat resumes a full period after things go quiet
         // instead of firing the instant a move ends or a line is finished.
-        if (moving || g_tracking || g_reader.partial()) {
+        if (moving || g_tracking || g_reader.partial())
+        {
             next_heartbeat = delayed_by_ms(now, HEARTBEAT_PERIOD_MS);
-        } else if (absolute_time_diff_us(now, next_heartbeat) <= 0) {
+        }
+        else if (absolute_time_diff_us(now, next_heartbeat) <= 0)
+        {
             next_heartbeat = delayed_by_ms(now, HEARTBEAT_PERIOD_MS);
             send(format_mstat(g_out, sizeof(g_out),
                               to_ms_since_boot(now) / 1000, g_az.pos_mdeg(),
