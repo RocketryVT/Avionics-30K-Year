@@ -240,12 +240,12 @@ Decision do_pin(const Command &c)
     d.gpio  = c.gpio;
     d.level = c.level;
 
-    // Driving a step line makes the driver take a step this firmware did not
-    // count, so afterwards the position it reports is one step away from the
-    // truth. Giving up the zero is the honest response, the same as after an
-    // emergency stop.
-    d.clear_az_zero = (c.gpio == PIN_AZ_PUL);
-    d.clear_el_zero = (c.gpio == PIN_EL_PUL);
+    // Both of an axis's lines are step lines. Driving one makes the driver
+    // take a step this firmware did not count, so afterwards the position it
+    // reports is one step away from the truth. Giving up the zero is the
+    // honest response, the same as after an emergency stop.
+    d.clear_az_zero = (c.gpio == PIN_AZ_CW || c.gpio == PIN_AZ_CCW);
+    d.clear_el_zero = (c.gpio == PIN_EL_CW || c.gpio == PIN_EL_CCW);
 
     say(d, format_pin(line_buf(d), MAX_REPLY_LEN, c.id, c.gpio, c.level));
     return d;

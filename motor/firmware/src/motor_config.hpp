@@ -59,7 +59,8 @@ struct AxisSpec {
     // depends on the driver's SW5 switch and on the gear mesh, so it cannot
     // be known until it is tried - and the two gear modes can disagree,
     // because an external gear pair reverses the direction and a belt does
-    // not.
+    // not. What it changes is which of the axis's two lines a positive step
+    // is sent on (step_line in pins.hpp).
     bool invert_dir;
 
     // The speed a move begins and ends at. See V_START_MDPS.
@@ -308,14 +309,6 @@ constexpr AxisSpec AZ_SPEC = {
              //               faulty drive, so the value was never worth
              //               much. Put back to false on 28 Oct 2026.
              //
-             //               It also decides which level the DIR pin RESTS
-             //               at between boot and the first move, because
-             //               init() parks the pin at dir_level(true,
-             //               invert_dir). False rests it LOW, which is the
-             //               4.8 V the optocoupler reads definitely; true
-             //               rested it HIGH, which is 1.7 V and no defined
-             //               level at all. Elevation has always rested LOW.
-             //
              //               Check with `move az 5 10` then `move az 5 -10`.
     V_START_MDPS,
     135000,  // accel_mdps2   135 deg/sec/sec (aiming for 180)
@@ -357,6 +350,8 @@ constexpr AxisSpec EL_SPEC = {
              //               180-degree move suggested true, but a half
              //               turn ends in the same place whichever way it
              //               goes - judge direction with small moves.
+             //               That was in PUL/DIR mode: check it again in
+             //               CW/CCW (step_line in pins.hpp).
     V_START_MDPS,
     135000,  // accel_mdps2   135 deg/sec/sec
     ACCEL_MIN_MDPS2,
@@ -430,10 +425,10 @@ constexpr float CHASE_MAX_DT_S = 0.05f;  // 50 ms
 // ============================================================================
 // Pulse timing
 // ============================================================================
-// The CL57TE manual's minimums are a 1 us pulse and 5 us of DIR setup. These
-// are what last year's ground station ran, which is far more generous. There
-// is no reason to shave them: even at full speed one step is still 124 us
-// from the next.
+// The CL57TE manual's minimum is a 1 us pulse. There is no direction setup
+// time to allow for: the manual asks for DIR to lead the pulse only "in
+// single pulse mode", which is PUL/DIR, and in CW/CCW mode a pulse carries
+// its own direction.
 //
 // The pulse is 20 us rather than the 1 us minimum because of the sentence
 // that follows it in section 8: "duty cycle is recommended 50%. If it is
@@ -443,29 +438,18 @@ constexpr float CHASE_MAX_DT_S = 0.05f;  // 50 ms
 // edge to ask an optocoupler to pass. 20 us is still only 16% of the 124 us
 // that separates two steps at full speed, so it costs nothing at that end
 // either, and MIN_INTERVAL_US (50 us) leaves it room even there.
-constexpr uint32_t PULSE_LOW_US     = 20;   // how long PUL is held LOW
-constexpr uint32_t DIR_SETUP_US     = 100;  // settle time after changing DIR
-// The extra wait when the DIR pin actually CHANGES level, on top of the
-// setup time above.
+constexpr uint32_t PULSE_LOW_US = 20;  // how long a line is held LOW
+
+// How long a line that the PIN command left LOW is given to let go, once it
+// is put back HIGH, before the next pulse on it.
 //
-// Nothing in the CL57TE manual asks for this. Its sequence chart wants DIR
-// stable 5 us before the pulse edge and says nothing else about direction,
-// and DIR_SETUP_US already clears that twenty times over. The reason it is
-// 25 ms rather than 1 is a bench symptom: an axis commanded to reverse would
-// turn the OLD way for a fraction of a second and then come back, which is
-// the drive acting on the previous direction for the first pulses and
-// catching up part way through. That is an input that has not finished
-// switching, and these inputs are driven under spec - a Pico high is 3.3 V
-// against the 5-24 V the drive asks for, and an optocoupler given less than
-// it wants is slow to turn OFF in particular.
+// NORMAL RUNNING NEVER PAYS THIS. Both lines rest HIGH between steps, so a
+// move, or a reversal mid-flight while tracking, starts pulsing at once.
+// (In PUL/DIR mode a reversal while tracking cost a 25 ms pause that stopped
+// both axes, because the DIR line had to change level and was slow to.)
 //
-// A PLANNED MOVE PAYS NOTHING FOR THIS. aim() runs while the axis is still
-// standing, and a two-axis move aims both before either begins, so the wait
-// happens with nothing turning.
-//
-// TRACKING DOES PAY. chase_tick() reverses mid-flight, and the loop is
-// single threaded, so this stops the other axis for the whole pause. 25 ms
-// is kept under CHASE_MAX_DT_S (50 ms) so a starved chase loop still resumes
-// from a time step it believes. If tracking ever looks lumpy, this is the
-// first number to bring back down.
-constexpr uint32_t REVERSE_PAUSE_MS = 25;   // extra pause before reversing
+// It is that same slowness that makes this 25 ms rather than a few us. These
+// inputs are driven under spec - a Pico high is 3.3 V against the 5-24 V the
+// drive asks for - and an optocoupler given less than it wants is slow to
+// turn OFF in particular. aim() and arm_chase() pay it with the axis at rest.
+constexpr uint32_t RELEASE_PAUSE_MS = 25;

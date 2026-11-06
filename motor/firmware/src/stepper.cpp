@@ -4,59 +4,63 @@
 
 #include "pins.hpp"
 
+// Claim one line as an output, at rest.
+//
+// The level is set before the pin is switched to an output. Doing it the
+// other way round makes the pin briefly drive low, and a low on either line
+// is a step - so the motor would twitch every time the Pico restarted.
+static void park(uint pin)
+{
+    gpio_init(pin);
+    gpio_put(pin, LINE_IDLE);
+    gpio_set_dir(pin, GPIO_OUT);
+}
+
 void Stepper::init()
 {
-    // Set the level before switching the pin to an output. Doing it the other
-    // way round makes the pin briefly drive low, and a low on PUL is a step -
-    // so the motor would twitch every time the Pico restarted.
-    gpio_init(pin_pul_);
-    gpio_put(pin_pul_, PUL_IDLE);
-    gpio_set_dir(pin_pul_, GPIO_OUT);
-
+    park(pin_cw_);
+    park(pin_ccw_);
     dir_positive_ = true;
-    gpio_init(pin_dir_);
-    gpio_put(pin_dir_, dir_level(dir_positive_, spec_.invert_dir));
-    gpio_set_dir(pin_dir_, GPIO_OUT);
 }
 
 bool Stepper::pins_ok() const
 {
-    return gpio_get(pin_pul_) == PUL_IDLE &&
-           gpio_get(pin_dir_) == dir_level(dir_positive_, spec_.invert_dir);
+    return gpio_get(pin_cw_) == LINE_IDLE && gpio_get(pin_ccw_) == LINE_IDLE;
 }
 
-void Stepper::set_direction(bool positive)
+void Stepper::release_lines()
 {
-    // Check the pad rather than only the remembered sign: an idle PIN
-    // command may have written a different level, or a replacement spec may
-    // have changed invert_dir. This readback does not verify the voltage or
-    // current at the driver's input.
-    const bool level     = dir_level(positive, spec_.invert_dir);
-    const bool reversing = (level != gpio_get(pin_dir_));
-
-    dir_positive_ = positive;
-    gpio_put(pin_dir_, level);
-
-    // The driver wants the direction settled well before the next pulse, and
-    // a reversal is where that is tightest, so it gets an extra pause.
-    if (reversing) {
-        sleep_ms(REVERSE_PAUSE_MS);
+    // Read from the pads, which is where PIN writes. PIN is only accepted
+    // while the axes are idle, so a line found LOW here was left that way by
+    // hand. This readback does not verify the voltage or current at the
+    // driver's input.
+    if (pins_ok()) {
+        return;
     }
-    busy_wait_us(DIR_SETUP_US);
+    gpio_put(pin_cw_, LINE_IDLE);
+    gpio_put(pin_ccw_, LINE_IDLE);
+
+    // Going back HIGH is not a step - the driver acts on the falling edge -
+    // but the input takes time to let go, and a pulse sent before it has
+    // would be lost. Nothing is turning yet, so the wait costs nothing.
+    sleep_ms(RELEASE_PAUSE_MS);
 }
 
 void Stepper::step()
 {
-    gpio_put(pin_pul_, PUL_PULSE);
+    const uint line =
+        step_line(pin_cw_, pin_ccw_, dir_positive_, spec_.invert_dir);
+    gpio_put(line, LINE_PULSE);
     busy_wait_us(PULSE_LOW_US);
-    gpio_put(pin_pul_, PUL_IDLE);
+    gpio_put(line, LINE_IDLE);
 
     pos_steps_ += dir_positive_ ? 1 : -1;
 }
 
 void Stepper::aim(const Move &m)
 {
-    set_direction(m.steps >= 0);
+    dir_positive_ = (m.steps >= 0);
+    release_lines();
 }
 
 void Stepper::begin(const Move &m, uint16_t id)
@@ -67,8 +71,8 @@ void Stepper::begin(const Move &m, uint16_t id)
     move_id_ = id;
     mode_    = (m.n_steps > 0) ? Mode::Planned : Mode::Idle;
 
-    // The first step is due immediately. aim() has already waited out the
-    // setup time, so the driver is ready.
+    // The first step is due immediately. aim() has already put both lines
+    // at rest, so the driver is ready.
     next_step_time_ = get_absolute_time();
     first_pulse_    = next_step_time_;
     last_pulse_     = next_step_time_;
@@ -124,12 +128,10 @@ bool Stepper::tick(absolute_time_t now)
 
 void Stepper::arm_chase()
 {
-    // PIN and spec changes are allowed while idle and can leave DIR out of
-    // sync with the remembered sign. Reassert it using the current spec and
-    // wait for setup before tracking can emit a pulse. If the first target
-    // asks for the other direction, chase_tick() will set that up as usual.
-    // Neither PIN nor spec changes are allowed once tracking is armed.
-    set_direction(dir_positive_);
+    // PIN is allowed while idle and can leave a line LOW. Put both back
+    // before tracking can emit a pulse. PIN is refused once tracking is
+    // armed, so nothing can disturb them again until it is off.
+    release_lines();
 
     // The target starts where the axis is, so arming on its own never moves
     // anything. Something has to send a target first.
@@ -205,16 +207,11 @@ bool Stepper::chase_tick(absolute_time_t now, bool braking)
         return true;  // not due yet
     }
 
-    // The driver needs the direction pin settled before a pulse, and
-    // set_direction() blocks to arrange that. It is only ever reached here at
-    // a near standstill: the velocity ramp passes through zero before it
-    // changes sign, which the host tests check on every axis in both gear
-    // modes.
-    const bool positive = (v_sps_ > 0.0f);
-    if (positive != dir_positive_) {
-        set_direction(positive);
-        now = get_absolute_time();
-    }
+    // Reversing is only a matter of which line the next pulse goes out on:
+    // there is no direction pin to set and nothing to wait for, so the other
+    // axis is never held up by it. It happens at a near standstill anyway,
+    // because the velocity ramp passes through zero before it changes sign.
+    dir_positive_ = (v_sps_ > 0.0f);
 
     step();
     last_pulse_ = now;

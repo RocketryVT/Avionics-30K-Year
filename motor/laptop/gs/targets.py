@@ -2,10 +2,13 @@ r"""Where a pointing direction comes from.
 
 The tracking loop needs one thing: *where should the antenna point, now?*
 This module is the boundary between that question and whatever answers it,
-with three answers available and one interface over them.
+with four answers available and one interface over them.
 
     ManualSource   a direction you type. Nothing else involved, so it is how
                    the chase loop gets proved on the bench.
+    MovingSource   a direction that will not keep still: it moves at a steady
+                   rate and turns back every so many degrees, so there is
+                   always a new target to chase without anybody typing one.
     SimSource      a rehearsal: a synthetic flight, or a recorded one
                    replayed from CSV. Takes its clock as a parameter, so a
                    two-minute flight can be run through in a test instantly.
@@ -103,6 +106,55 @@ class ManualSource(TargetSource):
 
     def latest(self, now: float) -> Fix | None:
         return self._fix
+
+
+def _out_and_back(travelled: float, span: float) -> float:
+    """How far from the start, after `travelled` degrees of going out and back.
+
+    Out to `span`, back to the start, out again: a triangle, so the speed is
+    the same all the way and only the direction changes. The sign of
+    `travelled` says which way is out.
+    """
+    lap = abs(travelled) % (2.0 * span)
+    out = lap if lap <= span else 2.0 * span - lap
+    return out if travelled >= 0 else -out
+
+
+class MovingSource(TargetSource):
+    """A direction that keeps moving, out at a steady rate and back again.
+
+    The step between a typed direction and a whole flight. Each axis moves at
+    its own rate from a starting direction, so the target changes every time
+    one is sent - the same stream of replacements a live feed will be, with
+    nobody typing them in. Each axis turns back after `span_deg` and returns
+    to the start, over and over, so it can be left running without walking
+    into a travel limit, and every turn is a reversal taken on the move.
+
+    A negative rate goes out the other way; zero holds that axis still. Like
+    SimSource it keeps no clock: `latest` is handed the time, and the first
+    call is where the motion starts.
+    """
+
+    name = "moving"
+
+    def __init__(self, az_deg: float, el_deg: float, az_rate_dps: float,
+                 el_rate_dps: float, span_deg: float = 30.0):
+        if span_deg <= 0:
+            raise ValueError("span_deg must be positive")
+        self._az = float(az_deg)
+        self._el = float(el_deg)
+        self._az_rate = float(az_rate_dps)
+        self._el_rate = float(el_rate_dps)
+        self._span = float(span_deg)
+        self._began: float | None = None
+
+    def latest(self, now: float) -> Fix:
+        if self._began is None:
+            self._began = now
+        gone = now - self._began
+        return Fix(self._az + _out_and_back(self._az_rate * gone, self._span),
+                   self._el + _out_and_back(self._el_rate * gone, self._span),
+                   now)
 
 
 class SimSource(TargetSource):

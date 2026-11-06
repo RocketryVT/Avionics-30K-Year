@@ -90,8 +90,8 @@ static AxisSpec g_boot_el   = EL_SPEC;
 static bool g_tracking = false;
 static absolute_time_t g_last_target = {};
 
-static Stepper g_az(g_az_spec, PIN_AZ_PUL, PIN_AZ_DIR);
-static Stepper g_el(g_el_spec, PIN_EL_PUL, PIN_EL_DIR);
+static Stepper g_az(g_az_spec, PIN_AZ_CW, PIN_AZ_CCW);
+static Stepper g_el(g_el_spec, PIN_EL_CW, PIN_EL_CCW);
 static LineReader g_reader;
 
 // One buffer, reused. Every reply is built into it whole and then sent with a
@@ -205,9 +205,12 @@ static const char *gear_note(GearMode g)
 
 static void print_banner(LoadResult loaded)
 {
-    printf("[motor] pins AZ PUL=GP%u DIR=GP%u  EL PUL=GP%u DIR=GP%u  startup levels OK\n",
-           PIN_AZ_PUL, PIN_AZ_DIR, PIN_EL_PUL, PIN_EL_DIR);
-    printf("[motor] active low: PUL rests HIGH and is pulled LOW to step\n");
+    printf("[motor] pins AZ CW=GP%u CCW=GP%u  EL CW=GP%u CCW=GP%u  startup levels OK\n",
+           PIN_AZ_CW, PIN_AZ_CCW, PIN_EL_CW, PIN_EL_CCW);
+    // Nothing here can read the switch, so this line is the operator's one
+    // chance to notice a driver set the other way.
+    printf("[motor] CW/CCW pulse mode - SW7 must be ON on both drivers\n");
+    printf("[motor] active low: both lines rest HIGH and are pulled LOW to step\n");
 
     printf("[motor] gear %s\n", gear_note(g_gear));
 
@@ -302,9 +305,9 @@ static void apply(const Decision &d)
     case Act::Nothing:
         break;
     case Act::StartMove:
-        // Every axis about to move is aimed before any of them begins. Each
-        // aim waits for its driver to see the direction pin, so doing them
-        // all first means both axes of a two-axis move set off together.
+        // Every axis about to move is aimed before any of them begins. An
+        // aim may have to wait for a line the PIN command left LOW, so doing
+        // them all first means both axes of a two-axis move set off together.
         if (d.move_az) {
             g_az.aim(d.az_move);
         }
@@ -462,11 +465,11 @@ static void report_done(Stepper &s, AxisId axis)
 
 int main()
 {
-    // These are bounded, read-only flash operations. Resolve the final
-    // specs before selecting DIR, then establish both outputs before stdio
-    // initialization or any wait for a host. An overlapping settings sector
-    // is never read; park the pins using the built-in specs and report the
-    // error once USB is available.
+    // These are bounded, read-only flash operations. Then park both axes'
+    // lines before stdio initialization or any wait for a host, so they are
+    // never left floating. An overlapping settings sector is never read; the
+    // built-in specs are used and the error is reported once USB is
+    // available.
     const bool settings_free = settings_sector_is_free();
     const LoadResult loaded = settings_free ? read_boot_settings()
                                             : LoadResult::Blank;
