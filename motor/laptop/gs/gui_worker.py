@@ -97,6 +97,19 @@ CAL_SPEED_DPS = 10.0
 # buffer and the window would show nothing.
 TRACK_READ_S = 0.02
 
+# How often the worker looks for the Pico while there is no connection, so
+# plugging it in is all it takes - no reconnect button, no restart. Looking
+# is only a scan of the serial ports, so this costs nothing while unplugged.
+RECONNECT_S = 2.0
+
+# What a State forgets when the connection goes. Everything here is a reading
+# from the Pico, and rule 1 is that the screen shows the machine: a position
+# left on screen with nothing plugged in would be a remembered one.
+_UNPLUGGED = dict(target="", version="", uptime_ms=0, moving=False,
+                  rebooted=False, tracking=False, pico_replay=False,
+                  source_name="", targets_sent=0, sample=None, pos=None,
+                  gear=None, cfg=None, lim=None, heartbeat_at=None)
+
 
 @dataclass(frozen=True)
 class State:
@@ -187,6 +200,11 @@ EVENT_NOTE = "note"
 # finished. Neither is needed to drive the move - they are for the display.
 EVENT_MOVE = "move"
 EVENT_DONE = "done"
+
+# What anything that needs the Pico says when there is none. The window says
+# the same before it even queues the job - see App._offline in gui.py.
+NOT_CONNECTED = ("not connected - plug in the Pico. The window finds it by "
+                 "itself.")
 
 
 @dataclass
@@ -405,7 +423,10 @@ class MotorWorker(threading.Thread):
         self.events.put((kind, payload))
 
     def _set_state(self, **changes) -> State:
-        self._state = replace(self._state, **changes)
+        state = replace(self._state, **changes)
+        if not state.connected:
+            state = replace(state, **_UNPLUGGED)
+        self._state = state
         self._emit(EVENT_STATE, self._state)
         return self._state
 
@@ -453,6 +474,10 @@ class MotorWorker(threading.Thread):
         self._emit(EVENT_LINE, ("<", text))
 
     def _close(self) -> None:
+        # A tracking loop cannot outlive its port. Left behind, it would
+        # keep the run loop in its tracking branch, which never reconnects.
+        self._loop = None
+        self._source = None
         self._console = None
         if self._session is not None:
             try:
@@ -584,7 +609,7 @@ class MotorWorker(threading.Thread):
     def _run_job(self, job: _Job) -> None:
         session = self._session
         if session is None:
-            self._emit(EVENT_NOTE, "not connected")
+            self._emit(EVENT_NOTE, NOT_CONNECTED)
             return
 
         if job.name == "zero":
@@ -626,7 +651,7 @@ class MotorWorker(threading.Thread):
             self._stop_tracking("disarmed")
         elif job.name == "line":
             if self._console is None:
-                self._emit(EVENT_NOTE, "not connected")
+                self._emit(EVENT_NOTE, NOT_CONNECTED)
             else:
                 # Straight through the prompt's own handling, which catches
                 # its own usage errors and refusals and prints them.
@@ -793,6 +818,7 @@ class MotorWorker(threading.Thread):
     def run(self) -> None:
         self._connect(self._port)
         next_poll = self._clock()
+        next_connect = self._clock() + RECONNECT_S
 
         try:
             while not self._stopping.is_set():
@@ -822,7 +848,14 @@ class MotorWorker(threading.Thread):
                     continue
 
                 now = self._clock()
-                if self._session is not None and now >= next_poll:
+                if self._session is None:
+                    # Unplugged, or never plugged in: keep looking, so the
+                    # window picks the Pico up the moment it appears.
+                    if now >= next_connect:
+                        next_connect = now + RECONNECT_S
+                        self._connect(self._port)
+                        next_poll = self._clock()
+                elif now >= next_poll:
                     next_poll = now + POLL_INTERVAL_S
                     self._poll()
         finally:

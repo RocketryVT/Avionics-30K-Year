@@ -50,6 +50,17 @@ is free because a gear change costs only the zeros and there are none yet;
 with the axes already zeroed the window gives way instead and shows
 whichever mode the Pico's gearing is.
 
+With no Pico plugged in
+-----------------------
+
+The window opens and stays usable without one: modes can be switched and
+the boxes filled in, so it can be set up first. Readings show as blank
+rather than remembered. Any button that needs the Pico says "not connected"
+instead of doing anything (see `_offline`). The worker keeps looking for the
+Pico every couple of seconds, so plugging it in is all it takes. When it
+connects, the mode chosen while unplugged is settled against it the same
+way as at startup.
+
 Typing commands
 ---------------
 
@@ -467,11 +478,10 @@ class App:
         self.b_apply = ttk.Button(buttons, text="apply",
                                   command=self._apply_settings)
         self.b_apply.grid(row=0, column=0, padx=2)
-        self.b_save = ttk.Button(buttons, text="save",
-                                 command=self.worker.save)
+        self.b_save = ttk.Button(buttons, text="save", command=self._save)
         self.b_save.grid(row=0, column=1, padx=2)
         self.b_defaults = ttk.Button(buttons, text="defaults",
-                                     command=self.worker.defaults)
+                                     command=self._defaults)
         self.b_defaults.grid(row=0, column=2, padx=2)
         frame.columnconfigure(5, weight=1)
 
@@ -760,12 +770,36 @@ class App:
     def _estop(self) -> None:
         self.worker.estop()
 
+    def _offline(self) -> bool:
+        """True, having said so, when there is no Pico to send anything to.
+
+        Unplugged, the window stays usable - modes, panels, the boxes - so it
+        can be set up before the Pico arrives. Every button that needs the
+        Pico checks here first, so pressing one says why nothing happened
+        instead of queueing a job, or asking "are you sure?" about something
+        that cannot happen.
+        """
+        if self._state.connected:
+            return False
+        self.note(gw.NOT_CONNECTED)
+        return True
+
+    def _save(self) -> None:
+        if not self._offline():
+            self.worker.save()
+
+    def _defaults(self) -> None:
+        if not self._offline():
+            self.worker.defaults()
+
     def _read(self, entry: ttk.Entry, what: str) -> float:
         # motor.py's own parser, so a number typed here means exactly what it
         # would mean at the prompt. It raises UsageError, caught by callers.
         return motor._number(entry.get().strip(), what)
 
     def _zero(self, axis: str) -> None:
+        if self._offline():
+            return
         try:
             text = self.e_zero.get().strip()
             deg = self._read(self.e_zero, "angle") if text else None
@@ -775,9 +809,12 @@ class App:
         self.worker.zero(axis, deg)
 
     def _calibrate(self, axis: str) -> None:
-        self.worker.calibrate(axis)
+        if not self._offline():
+            self.worker.calibrate(axis)
 
     def _move_one(self, absolute: bool = False) -> None:
+        if self._offline():
+            return
         try:
             speed = self._read(self.m1_speed, "speed")
             angle = self._read(self.m1_angle, "angle")
@@ -788,6 +825,8 @@ class App:
                          absolute=absolute)
 
     def _move_both(self, absolute: bool = False) -> None:
+        if self._offline():
+            return
         try:
             values = {
                 axis: (self._read(self.m2_speed[axis], f"{axis} speed"),
@@ -810,6 +849,8 @@ class App:
         self._refresh_enabled(self._state)
 
     def _arm(self) -> None:
+        if self._offline():
+            return
         kind = self.m3_source.get()
         try:
             hz = self._read(self.m3_hz, "targets/sec")
@@ -861,6 +902,8 @@ class App:
         self.worker.stop_tracking()
 
     def _point(self) -> None:
+        if self._offline():
+            return
         try:
             az = self._read(self.m3_az, "azimuth")
             el = self._read(self.m3_el, "elevation")
@@ -907,6 +950,8 @@ class App:
         Comparing first keeps `apply` from sending six commands every time,
         and keeps it from marking the settings unsaved when nothing changed.
         """
+        if self._offline():
+            return
         cfg = self._state.cfg
         if cfg is None:
             self.note("no settings read yet")
@@ -941,6 +986,19 @@ class App:
         wanted = self.mode.get()
         gear_wanted = MODE_GEAR[wanted]
         state = self._state
+
+        # Unplugged: just show the mode. Its gearing is applied when the Pico
+        # connects, by _settle_mode, under the same rule as at startup - set
+        # while nothing is zeroed, never at the cost of a zero.
+        if not state.connected:
+            self._applied_mode = wanted
+            self._mode_settled = False
+            self._show_mode_panel(wanted)
+            self._refresh_enabled(state)
+            word = "on" if gear_wanted else "off"
+            self.note(f"mode {wanted} - gear {word} is set when the Pico "
+                      f"connects, unless it is already zeroed the other way")
+            return
 
         # Already in the right gearing - or we have not been told yet, in
         # which case asking the Pico is the only way to find out and the
@@ -1128,6 +1186,10 @@ class App:
         actually changed, and the mode buttons need to know the gearing.
         """
         self._state = st
+        # A Pico that comes back may be a different one, or the same one
+        # restarted, so the mode on screen is settled against it afresh.
+        if not st.connected:
+            self._mode_settled = False
         self._settle_mode(st)
         self._show_title(st)
         self.v_port.configure(text=st.port or "no port")
@@ -1261,23 +1323,30 @@ class App:
         settled = st.connected and not st.working and not st.moving
         can_move = settled and st.zeroed and not st.rebooted
 
+        # Unplugged, nothing can be in progress, so everything stays
+        # clickable: the window can be set up before the Pico arrives, and a
+        # button that needs it says "not connected" - see _offline.
+        offline = not st.connected
+        usable = settled or offline
+        movable = can_move or offline
+
         for widget in (self.b_zero_all, self.b_zero_az, self.b_zero_el,
                        self.b_apply, self.b_save, self.b_defaults):
-            widget.state(["!disabled"] if settled else ["disabled"])
+            widget.state(["!disabled"] if usable else ["disabled"])
 
         for widget in (self.b_move_one, self.b_move_both,
                        self.b_goto_one, self.b_goto_both,
                        *self.b_cal.values()):
-            widget.state(["!disabled"] if can_move else ["disabled"])
+            widget.state(["!disabled"] if movable else ["disabled"])
 
         # No switching modes mid-flight: `settled` is false while tracking,
         # which is what stops it.
         for button in self.r_mode.values():
-            button.state(["!disabled"] if settled else ["disabled"])
+            button.state(["!disabled"] if usable else ["disabled"])
 
         # Arming needs a zero and a settled machine; disarming must always be
         # available, like the stops.
-        self.b_arm.state(["!disabled"] if can_move and not st.tracking
+        self.b_arm.state(["!disabled"] if movable and not st.tracking
                          else ["disabled"])
         self.b_disarm.state(["!disabled"] if st.tracking else ["disabled"])
         # The direction boxes stay editable whenever the source is manual,

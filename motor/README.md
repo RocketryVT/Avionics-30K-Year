@@ -291,7 +291,7 @@ travel limit.
 | `py -m gs.motor --verbose` | ...showing the heartbeat |
 | `py -m gs.motor -c "pos"` | Run one prompt command and exit. Repeat `-c` for more |
 | `py -m gs.motor --list` | List serial ports, marking the Pico, and exit |
-| `py -m gs.gui` | The window: all of the above, with the state on screen |
+| `py -m gs.gui` | The window: all of the above, with the state on screen. Opens without a Pico too, and connects by itself when one is plugged in |
 | `py -m gs.track --sim` | Send a stream of pointing targets. See **Tracking** |
 
 ### In WSL (from this folder)
