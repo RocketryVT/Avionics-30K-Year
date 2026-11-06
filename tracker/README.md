@@ -74,7 +74,7 @@ These are gaps to the latest motor target. Checking against the continuous traje
 
 ### Change the replay data or settings
 
-[replay_config.hpp](tests/bench_tests/replay/replay_config.hpp) holds the update period, station position, and geoid separation. The current **synthetic** station is at `28.5954790666, -80.6`, one mile south of the CSV launch point. Its altitude and the geoid separation are both set to `0.0` m for the bench test. Those are test assumptions; use a verified position and altitude reference for deployment. Both optional reference values must be set for replay to submit positions.
+[replay_config.hpp](tests/bench_tests/replay/replay_config.hpp) holds the update period, station position, and geoid separation. The current **synthetic** station is at `28.6093124565, -80.6`, 250 ft (76.2 m) due south of the CSV launch point. Its altitude and the geoid separation are both set to `0.0` m for the bench test. Those are test assumptions; use a verified position and altitude reference for deployment. Both optional reference values must be set for replay to submit positions.
 
 The checked-in [replay_data.hpp](tests/bench_tests/replay/replay_data.hpp) contains 889 samples from `gps_sim_data.csv`, so the CSV is only needed to regenerate the table. The input columns are time in seconds, altitude above sea level in feet, latitude in decimal degrees north, and longitude in decimal degrees east. The converter checks the header and increasing timestamps, and converts feet to meters. Replay adds the signed geoid separation to obtain ellipsoidal altitude.
 
