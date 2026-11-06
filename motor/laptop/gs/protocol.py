@@ -22,7 +22,7 @@ The two directions, one line each, "\n" terminated:
     DEFAULTS,<id>                       GEAR,<id>,<ON|OFF>,<az_num>,...
     SETTINGS,<id>                       TRK,<id>,<ON|OFF>,<az_target>,...
     GEAR,<id>[,<ON|OFF>]
-    TRACK,<id>[,<ON|OFF>]
+    TRACK,<id>[,<ON|OFF|REPLAY>]
     TARGET,<id>,<az_mdeg>,<el_mdeg>
 
 A MOVE can also turn both axes at once, each at its own speed:
@@ -42,7 +42,10 @@ SET changes one setting on one axis - ACCEL, or the MIN or MAX travel limit
 back to the built-in ones from motor_config.hpp, and SETTINGS reports them.
 
 TRACK arms and disarms tracking; TARGET says where to point while it is
-armed. A target is absolute, names both axes, and is answered with **nothing
+armed. TRACK REPLAY arms it too, but the Pico feeds itself the simulated
+flight built into its firmware instead of waiting for TARGETs - a bench test
+with nothing on this side. TRACK ON or OFF, STOP, ESTOP or a TARGET from
+here all end a replay. A target is absolute, names both axes, and is answered with **nothing
 at all** when accepted - it arrives several times a second and an ACK apiece
 would double the traffic without saying anything the TRK stream is not
 already saying. Only a refusal comes back.
@@ -110,6 +113,10 @@ ZERO_AXES = ("AZ", "EL", "ALL")
 ON = "ON"
 OFF = "OFF"
 
+# TRACK's third word: arm, and play the simulated flight built into the
+# firmware. The TRK replies still say ON - it is armed.
+REPLAY = "REPLAY"
+
 # What SET can change: acceleration in deg/sec/sec, the travel limits and the
 # deadband in degrees. All cross the wire in thousandths, like every other
 # number.
@@ -135,6 +142,7 @@ ERR_MEANING = {
     "range": "that value is outside what this build allows",
     "flash": "the Pico could not write its flash, so nothing was saved",
     "track": "tracking is not armed - send track on first",
+    "replay": "this firmware has no replay station set in replay_config.hpp",
 }
 
 
@@ -391,8 +399,12 @@ def settings(cmd_id: int) -> str:
     return f"SETTINGS,{_check_id(cmd_id)}"
 
 
-def track(cmd_id: int, on: bool | None = None) -> str:
+def track(cmd_id: int, on: bool | None = None, replay: bool = False) -> str:
     """Ask whether tracking is armed, or arm and disarm it.
+
+    `replay` arms it with the Pico playing the simulated flight built into
+    its firmware, so nothing need send targets. It is refused with ERR
+    replay if the firmware has no station position to point from.
 
     Arming needs both axes zeroed, and is refused with ERR nozero otherwise.
     Disarming is never refused - it is the way out - and brings both axes to
@@ -402,6 +414,8 @@ def track(cmd_id: int, on: bool | None = None) -> str:
     asked, and gives up by itself if targets stop arriving.
     """
     _check_id(cmd_id)
+    if replay:
+        return f"TRACK,{cmd_id},{REPLAY}"
     if on is None:
         return f"TRACK,{cmd_id}"
     return f"TRACK,{cmd_id},{ON if on else OFF}"

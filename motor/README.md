@@ -99,7 +99,7 @@ New machine? Do `docs/SETUP.md` first.
 | `save` | Keep the settings, so a restart comes back with them |
 | `defaults` | Back to the numbers in `motor_config.hpp` (then `save` to keep that) |
 | `gear [on\|off]` | Whether the final gear pair is counted. See **Gear modes** |
-| `track [on\|off]` | Arm or disarm chasing a target. See **Tracking** |
+| `track [on\|off\|replay]` | Arm or disarm chasing a target, or fly the built-in simulated flight. See **Tracking** |
 | `pin <gpio> <0\|1>` | Hold a pin high or low, for a multimeter (GP4-7, GP12-15). Any motor pin (GP4-7) is a step line, so it costs that axis its zero |
 | `sweep [axis=az] [angle=45] [speeds=1,5,90] [pause]` | One angle at each speed in turn |
 | `random [axis=az] [count=10] [speed=5] [seed=N] [pause]` | Random angles inside the limits |
@@ -237,6 +237,15 @@ targets, and disarms when it finishes. Close the `motor>` prompt first - only
 one program can have the port open. (`track on` at the prompt only arms it,
 which is mostly useful for seeing the 1.5 second give-up happen.)
 
+The Pico can also supply its own. In the window, pick mode 3, choose
+**the Pico's built-in flight**, and press **ARM tracking**. That arms
+tracking and has the Pico fly the simulated flight built into its firmware,
+with nothing sent from the laptop. (`track replay` at the prompt and
+`TRACK,<id>,REPLAY` from a serial monitor do the same.) That one is a bench test. `track off`, `stop`, `estop`, or a target
+from the laptop ends it. It is a different thing from `gs.track --replay`,
+which sends a recorded flight from the laptop. See
+[the tracker README](../tracker/README.md#run-the-replay).
+
 | | |
 | --- | --- |
 | `py -m gs.track --sim` | A synthetic flight: 30,000 ft from 300 m downrange |
@@ -282,7 +291,7 @@ travel limit.
 | `py -m gs.motor --verbose` | ...showing the heartbeat |
 | `py -m gs.motor -c "pos"` | Run one prompt command and exit. Repeat `-c` for more |
 | `py -m gs.motor --list` | List serial ports, marking the Pico, and exit |
-| `py -m gs.gui` | The window: all of the above, with the state on screen |
+| `py -m gs.gui` | The window: all of the above, with the state on screen. Opens without a Pico too, and connects by itself when one is plugged in |
 | `py -m gs.track --sim` | Send a stream of pointing targets. See **Tracking** |
 
 ### In WSL (from this folder)

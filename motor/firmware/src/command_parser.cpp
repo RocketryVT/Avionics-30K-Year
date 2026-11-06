@@ -352,7 +352,10 @@ Command parse_command(const char *line)
 
     case Verb::Track: {
         if (track_with_mode) {
-            if (!read_on_off(f[2], &c.track_on)) {
+            if (is_word(f[2], "REPLAY")) {
+                c.track_on     = true;
+                c.track_replay = true;
+            } else if (!read_on_off(f[2], &c.track_on)) {
                 return fail(ParseError::Syntax, c.id);
             }
             c.has_track = true;

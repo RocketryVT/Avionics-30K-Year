@@ -177,7 +177,9 @@ class TrackingLoop:
             self._lim = self.session.limits()
         except sn.SessionError:
             self._lim = None
-        trk = self.session.track(True)
+        # The Pico's own flight is armed with TRACK REPLAY; everything else
+        # with TRACK ON, which never starts it.
+        trk = self.session.track(True, replay=self.source.pico_replay)
         self._trk = trk
         if isinstance(self.source, tg.DeltaSource):
             self.source.anchor(p.mdeg_to_deg(trk.az_pos_mdeg),

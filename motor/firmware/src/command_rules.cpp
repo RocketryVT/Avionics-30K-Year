@@ -402,6 +402,10 @@ Decision do_track(const Command &c, const MachineState &s)
 {
     const bool wanted = c.has_track ? c.track_on : s.tracking;
 
+    // TRACK ON and TRACK OFF both end a replay; only TRACK REPLAY starts
+    // one. A query leaves it as it is.
+    const bool wanted_replay = c.has_track ? c.track_replay : s.replaying;
+
     // A new tracking session must start from idle. arm_chase() resets the
     // plan, move ID and velocity, so using it during a planned move or while
     // braking would silently discard that motion. Queries, TRACK OFF and
@@ -417,10 +421,20 @@ Decision do_track(const Command &c, const MachineState &s)
         return refuse(c, ErrCode::NoZero, "");
     }
 
+    // The simulated flight is pointed at from a station position set in
+    // replay_config.hpp. Without one it would arm and then send nothing,
+    // and the watchdog would quietly disarm it - so say why instead.
+    if (wanted_replay && !s.replaying && !s.replay_ready) {
+        return refuse(c, ErrCode::NoReplay, "");
+    }
+
+    // Switching between ON and REPLAY while armed changes only where the
+    // targets come from: the axes stay armed and keep chasing.
     Decision d;
-    if (wanted != s.tracking) {
-        d.act      = Act::SetTrack;
-        d.track_on = wanted;
+    if (wanted != s.tracking || wanted_replay != s.replaying) {
+        d.act          = Act::SetTrack;
+        d.track_on     = wanted;
+        d.track_replay = wanted_replay;
     }
 
     MachineState after = s;

@@ -115,9 +115,11 @@ ENTRIES = [
     # --- tracking ----------------------------------------------------------
     Entry(
         command="track",
-        usage="track [on|off]",
+        usage="track [on|off|replay]",
         what="Arms or disarms chasing a target. Arming moves nothing on its "
-             "own.",
+             "own. 'replay' arms it and has the Pico fly the simulated "
+             "flight built into its firmware, with no targets sent from "
+             "here.",
         when="Rarely by hand: the window's mode 3 and 'py -m gs.track' arm "
              "it themselves. Useful for checking arming works, and for "
              "watching the safety stop - with no targets arriving the Pico "

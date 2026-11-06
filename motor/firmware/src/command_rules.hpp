@@ -49,6 +49,12 @@ struct MachineState {
     // is, so a stray message cannot move anything.
     bool tracking = false;
 
+    // True while the built-in simulated flight is feeding the targets
+    // (TRACK REPLAY), and whether it has the station position and geoid
+    // separation it needs to run at all.
+    bool replaying    = false;
+    bool replay_ready = false;
+
     // Where tracking is pointing, in steps, for the TRK report.
     int32_t az_target_steps = 0;
     int32_t el_target_steps = 0;
@@ -92,7 +98,7 @@ enum class Act {
     SetSettings,  // run with az_spec and el_spec from now on
     SaveSettings, // write the settings in force to flash
     SetGear,      // change gear mode: gear, az_spec and el_spec together
-    SetTrack,     // arm or disarm tracking on both axes
+    SetTrack,     // arm or disarm tracking, start or stop the replay
     SetTarget,    // point here: az_steps and el_steps
 };
 
@@ -118,8 +124,10 @@ struct Decision {
     int32_t az_steps = 0;
     int32_t el_steps = 0;
 
-    // SetTrack: armed or not.
+    // SetTrack: armed or not, and whether the built-in simulated flight
+    // feeds the targets. track_replay is only ever set with track_on.
     bool track_on = false;
+    bool track_replay = false;
 
     // SetPin. Driving a step line makes the driver take a step nobody
     // counted, so that axis no longer knows where it is.

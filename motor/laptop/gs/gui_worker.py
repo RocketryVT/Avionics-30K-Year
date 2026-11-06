@@ -97,6 +97,19 @@ CAL_SPEED_DPS = 10.0
 # buffer and the window would show nothing.
 TRACK_READ_S = 0.02
 
+# How often the worker looks for the Pico while there is no connection, so
+# plugging it in is all it takes - no reconnect button, no restart. Looking
+# is only a scan of the serial ports, so this costs nothing while unplugged.
+RECONNECT_S = 2.0
+
+# What a State forgets when the connection goes. Everything here is a reading
+# from the Pico, and rule 1 is that the screen shows the machine: a position
+# left on screen with nothing plugged in would be a remembered one.
+_UNPLUGGED = dict(target="", version="", uptime_ms=0, moving=False,
+                  rebooted=False, tracking=False, pico_replay=False,
+                  source_name="", targets_sent=0, sample=None, pos=None,
+                  gear=None, cfg=None, lim=None, heartbeat_at=None)
+
 
 @dataclass(frozen=True)
 class State:
@@ -130,6 +143,9 @@ class State:
     # is what the window shows instead.
     tracking: bool = False
     source_name: str = ""
+    # True when the source is the Pico's built-in flight, so no targets are
+    # sent from here and "0 targets sent" is not a fault.
+    pico_replay: bool = False
     targets_sent: int = 0
     sample: object | None = None  # a tracking.Sample
 
@@ -155,6 +171,8 @@ class State:
             return f"not connected{': ' + self.error if self.error else ''}"
         if self.rebooted:
             return "the Pico restarted - re-zero before moving"
+        if self.tracking and self.pico_replay:
+            return "TRACKING - the Pico is flying its built-in flight"
         if self.tracking:
             where = f" from {self.source_name}" if self.source_name else ""
             return (f"TRACKING{where} - {self.targets_sent} targets sent")
@@ -182,6 +200,11 @@ EVENT_NOTE = "note"
 # finished. Neither is needed to drive the move - they are for the display.
 EVENT_MOVE = "move"
 EVENT_DONE = "done"
+
+# What anything that needs the Pico says when there is none. The window says
+# the same before it even queues the job - see App._offline in gui.py.
+NOT_CONNECTED = ("not connected - plug in the Pico. The window finds it by "
+                 "itself.")
 
 
 @dataclass
@@ -365,7 +388,9 @@ class MotorWorker(threading.Thread):
                        span_deg: float = 30.0) -> None:
         """Arm tracking and start sending targets.
 
-        `kind` is "manual", "moving" or "sim". The rates and span are only
+        `kind` is "manual", "moving", "sim" (a flight worked out here and
+        sent as targets) or "replay" (the flight built into the Pico's
+        firmware, which sends nothing from here). The rates and span are only
         used by "moving", which sets off from az_deg/el_deg. The source is
         built here, on the worker's thread, because that is the only thread
         allowed to touch it afterwards.
@@ -398,7 +423,10 @@ class MotorWorker(threading.Thread):
         self.events.put((kind, payload))
 
     def _set_state(self, **changes) -> State:
-        self._state = replace(self._state, **changes)
+        state = replace(self._state, **changes)
+        if not state.connected:
+            state = replace(state, **_UNPLUGGED)
+        self._state = state
         self._emit(EVENT_STATE, self._state)
         return self._state
 
@@ -446,6 +474,10 @@ class MotorWorker(threading.Thread):
         self._emit(EVENT_LINE, ("<", text))
 
     def _close(self) -> None:
+        # A tracking loop cannot outlive its port. Left behind, it would
+        # keep the run loop in its tracking branch, which never reconnects.
+        self._loop = None
+        self._source = None
         self._console = None
         if self._session is not None:
             try:
@@ -577,7 +609,7 @@ class MotorWorker(threading.Thread):
     def _run_job(self, job: _Job) -> None:
         session = self._session
         if session is None:
-            self._emit(EVENT_NOTE, "not connected")
+            self._emit(EVENT_NOTE, NOT_CONNECTED)
             return
 
         if job.name == "zero":
@@ -619,7 +651,7 @@ class MotorWorker(threading.Thread):
             self._stop_tracking("disarmed")
         elif job.name == "line":
             if self._console is None:
-                self._emit(EVENT_NOTE, "not connected")
+                self._emit(EVENT_NOTE, NOT_CONNECTED)
             else:
                 # Straight through the prompt's own handling, which catches
                 # its own usage errors and refusals and prints them.
@@ -698,6 +730,8 @@ class MotorWorker(threading.Thread):
                                      el_rate_dps, span_deg)
         elif kind == "sim":
             source = tg.SimSource.rocket(hz=hz)
+        elif kind == "replay":
+            source = tg.PicoReplaySource()
         else:
             self._emit(EVENT_NOTE, f"no source called {kind!r}")
             return
@@ -710,9 +744,15 @@ class MotorWorker(threading.Thread):
         self._source = source
         self._loop = loop
         self._set_state(tracking=True, source_name=source.name,
+                        pico_replay=source.pico_replay,
                         targets_sent=0, sample=None)
-        self._emit(EVENT_NOTE,
-                   f"tracking armed from {source.name} at {hz:g} Hz")
+        if source.pico_replay:
+            self._emit(EVENT_NOTE,
+                       "tracking armed - the Pico is flying its built-in "
+                       "flight, nothing is sent from here")
+        else:
+            self._emit(EVENT_NOTE,
+                       f"tracking armed from {source.name} at {hz:g} Hz")
 
     def _stop_tracking(self, why: str | None) -> None:
         """Disarm and let the loop go. Safe when there is nothing running."""
@@ -759,10 +799,15 @@ class MotorWorker(threading.Thread):
         # in the stream. Following it rather than arguing keeps the window
         # showing what the machine is actually doing.
         if sample.trk is not None and not sample.trk.armed:
+            # For the Pico's own flight this is the normal ending: it runs
+            # out of positions and its watchdog disarms.
+            replay = self._source is not None and self._source.pico_replay
             self._loop = None
             self._source = None
             self._set_state(tracking=False, sample=sample)
             self._emit(EVENT_NOTE,
+                       "the Pico stopped tracking - its built-in flight "
+                       "finished, or something stopped it" if replay else
                        "the Pico stopped tracking - no targets reached it, "
                        "or something stopped it")
             return
@@ -773,6 +818,7 @@ class MotorWorker(threading.Thread):
     def run(self) -> None:
         self._connect(self._port)
         next_poll = self._clock()
+        next_connect = self._clock() + RECONNECT_S
 
         try:
             while not self._stopping.is_set():
@@ -802,7 +848,14 @@ class MotorWorker(threading.Thread):
                     continue
 
                 now = self._clock()
-                if self._session is not None and now >= next_poll:
+                if self._session is None:
+                    # Unplugged, or never plugged in: keep looking, so the
+                    # window picks the Pico up the moment it appears.
+                    if now >= next_connect:
+                        next_connect = now + RECONNECT_S
+                        self._connect(self._port)
+                        next_poll = self._clock()
+                elif now >= next_poll:
                     next_poll = now + POLL_INTERVAL_S
                     self._poll()
         finally:

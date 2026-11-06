@@ -90,21 +90,23 @@ add_subdirectory(
 
 target_link_libraries(gs_motor PRIVATE motor_interface)
 
-# Optional simulated GPS replay for bench testing.
-option(GS_ENABLE_REPLAY "Build the simulated GPS bench replay" OFF)
+# The simulated GPS flight for bench tests. It is always built in, and only
+# TRACK REPLAY plays it, so there is one firmware for the bench and the field.
+# It costs about 80 KB of the Pico 2 W's 4 MB of flash.
+set(REPLAY_DIR
+    "${CMAKE_CURRENT_SOURCE_DIR}/../../tracker/tests/bench_tests/replay"
+)
 
-if(GS_ENABLE_REPLAY)
-    set(REPLAY_DIR
-        "${CMAKE_CURRENT_SOURCE_DIR}/../../tracker/tests/bench_tests/replay"
-    )
+target_sources(gs_motor PRIVATE
+    "${REPLAY_DIR}/replay_position.cpp"
+)
 
-    target_sources(gs_motor PRIVATE
-        "${REPLAY_DIR}/replay_position.cpp"
-    )
+target_include_directories(gs_motor PRIVATE "${REPLAY_DIR}")
 
-    target_include_directories(gs_motor PRIVATE "${REPLAY_DIR}")
-    target_compile_definitions(gs_motor PRIVATE GS_ENABLE_REPLAY=1)
-endif()
+# GS_ENABLE_REPLAY used to be a switch here. A build folder configured with it
+# keeps it in its cache, where it now does nothing - drop it so nobody thinks
+# it still matters.
+unset(GS_ENABLE_REPLAY CACHE)
 
 # ----------------------------------------------------------------------------
 # Firmware identity and compiler warnings

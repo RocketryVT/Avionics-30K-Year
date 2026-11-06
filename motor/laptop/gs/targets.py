@@ -73,6 +73,11 @@ class TargetSource:
 
     name = "source"
 
+    # True for the one source whose directions come from the Pico itself
+    # rather than from here - see PicoReplaySource. It changes how tracking
+    # is armed (TRACK REPLAY instead of TRACK ON), and nothing else.
+    pico_replay = False
+
     def latest(self, now: float) -> Fix | None:
         raise NotImplementedError
 
@@ -276,6 +281,25 @@ class SimSource(TargetSource):
                 fixes.append(Fix(float(row["az_deg"]), float(row["el_deg"]),
                                  float(row["t_s"])))
         return cls(fixes, loop=loop)
+
+
+class PicoReplaySource(TargetSource):
+    """The simulated flight built into the Pico's firmware.
+
+    Not a source of directions at all, from this side: arming with it sends
+    TRACK REPLAY, and the Pico then feeds itself the flight in
+    tracker/tests/bench_tests/replay. So `latest` never has anything and the
+    loop sends no targets - it only reads the TRK stream back, which is what
+    keeps the window's readout and its stop handling the same as for every
+    other source. A target sent from here would end the replay, which is
+    the other reason this one must never return a Fix.
+    """
+
+    name = "the Pico's built-in flight"
+    pico_replay = True
+
+    def latest(self, now: float) -> Fix | None:
+        return None
 
 
 class LiveSource(TargetSource):

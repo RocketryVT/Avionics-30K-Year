@@ -77,6 +77,7 @@ enum class ErrCode {
     Range,      // a SET value outside what this build allows
     Flash,      // SAVE could not write the settings to flash
     NotTracking, // a TARGET arrived with tracking not armed
+    NoReplay,    // TRACK REPLAY, but the replay has no station position set
 };
 
 // The words used on the wire for each of these.

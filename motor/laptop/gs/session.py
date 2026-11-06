@@ -363,14 +363,16 @@ class Session:
         cmd_id = self.ids.next()
         return self.request(p.settings(cmd_id), cmd_id, (p.Cfg,), "SETTINGS")
 
-    def track(self, on: bool | None = None) -> p.Trk:
+    def track(self, on: bool | None = None, replay: bool = False) -> p.Trk:
         """Ask whether tracking is armed, or arm and disarm it.
 
         Returns what the Pico is doing afterwards. Arming is refused unless
-        both axes are zeroed; disarming never is.
+        both axes are zeroed; disarming never is. `replay` arms it with the
+        Pico playing its built-in simulated flight.
         """
         cmd_id = self.ids.next()
-        return self.request(p.track(cmd_id, on), cmd_id, (p.Trk,), "TRACK")
+        return self.request(p.track(cmd_id, on, replay), cmd_id, (p.Trk,),
+                            "TRACK")
 
     def set_target(self, az_deg: float, el_deg: float) -> None:
         """Say where to point. Fire and forget.

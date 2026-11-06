@@ -71,7 +71,7 @@ HELP_TEXT = """\
   save                             keep the settings after a restart
   defaults                         back to the numbers in motor_config.hpp
   gear [on|off]                    count the final gear pair, or not
-  track [on|off]                   arm or disarm chasing a target
+  track [on|off|replay]            arm or disarm chasing a target
   sweep [angle=45] [speeds=1,5,90] [pause]   one angle at each speed
   random [count=10] [speed=5] [seed=N] [pause]   angles within the limits
   true [row] <degrees>             what the protractor really reads
@@ -88,7 +88,9 @@ HELP_TEXT = """\
   'gear off' means each axis on its own, angles at the gearbox shaft.
   To track, close this prompt and run 'py -m gs.track' (or use the window):
   it arms tracking and sends the targets. 'track on' here only arms it, and
-  with nothing sending targets the Pico gives up after a second or so."""
+  with nothing sending targets the Pico gives up after a second or so.
+  'track replay' arms it and has the Pico fly the simulated flight built
+  into its firmware, on its own - a bench test. 'track off' or 'stop' ends it."""
 
 
 class UsageError(Exception):
@@ -378,7 +380,16 @@ class Console:
 
     def do_track(self, args: list[str]) -> None:
         """Arm or disarm chasing a target, or just report."""
-        wanted = _on_off(args, "track [on|off]")
+        if len(args) == 1 and args[0].strip().lower() == "replay":
+            self.report_track(self.session.track(replay=True))
+            self.say(
+                "  playing the simulated flight built into the firmware. "
+                "'verbose on' shows it;"
+            )
+            self.say("  'track off' or 'stop' ends it early.")
+            return
+
+        wanted = _on_off(args, "track [on|off|replay]")
         if wanted is None:
             self.report_track(self.session.track())
             return
