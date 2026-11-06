@@ -543,18 +543,22 @@ class App:
         picker = ttk.Frame(track)
         picker.grid(row=0, column=0, columnspan=4, sticky="w")
         self.m3_source = tk.StringVar(value="manual")
+        # The last one is the flight built into the Pico's firmware: the
+        # Pico feeds itself, so nothing is sent from here and the targets/sec
+        # box does not apply.
         for col, (value, text) in enumerate((
             ("manual", "a direction I type"),
             ("moving", "a moving target"),
             ("sim", "a simulated flight"),
+            ("replay", "the Pico's built-in flight"),
         )):
             ttk.Radiobutton(picker, text=text, value=value,
                             variable=self.m3_source,
                             command=self._source_chosen).grid(
                 row=0, column=col, sticky="w", **PAD)
-        ttk.Label(picker, text="at").grid(row=0, column=3, padx=(12, 2))
-        self.m3_hz = self._entry(picker, 0, 4, "5", width=5)
-        ttk.Label(picker, text="targets/sec").grid(row=0, column=5, padx=2)
+        ttk.Label(picker, text="at").grid(row=0, column=4, padx=(12, 2))
+        self.m3_hz = self._entry(picker, 0, 5, "5", width=5)
+        ttk.Label(picker, text="targets/sec").grid(row=0, column=6, padx=2)
 
         aim = ttk.Frame(track)
         aim.grid(row=1, column=0, columnspan=4, sticky="w")
@@ -827,22 +831,29 @@ class App:
             self.note("back-and-forth angle must be more than zero")
             return
 
-        if kind == "manual":
-            following = "the direction you typed"
-        elif kind == "moving":
-            following = ("a target that starts at az %g el %g and moves "
-                         "az %g, el %g deg/s, back and forth over %g deg,"
-                         % (az, el, *motion))
+        if kind == "replay":
+            message = (
+                "The motors will start moving on their own, following the "
+                "simulated flight built into the Pico's firmware (about "
+                "2.5 minutes). Nothing is sent from the laptop.\n\n"
+                "STOP, E-STOP and disarm stay live. When the flight ends the "
+                "Pico stops tracking by itself.")
         else:
-            following = "a simulated flight"
-        if not self.confirm(
-            "Arm tracking?",
-            f"The motors will start moving on their own, following "
-            f"{following}"
-            f" at {hz:g} targets a second.\n\n"
-            "STOP and E-STOP stay live. The Pico also gives up by itself if "
-            "targets stop reaching it.",
-        ):
+            if kind == "manual":
+                following = "the direction you typed"
+            elif kind == "moving":
+                following = ("a target that starts at az %g el %g and moves "
+                             "az %g, el %g deg/s, back and forth over %g deg,"
+                             % (az, el, *motion))
+            else:
+                following = "a simulated flight"
+            message = (
+                f"The motors will start moving on their own, following "
+                f"{following}"
+                f" at {hz:g} targets a second.\n\n"
+                "STOP and E-STOP stay live. The Pico also gives up by itself "
+                "if targets stop reaching it.")
+        if not self.confirm("Arm tracking?", message):
             return
         self.worker.start_tracking(kind, hz, az, el, *motion)
 
@@ -882,7 +893,8 @@ class App:
                                          ("deg", "deg", "deg", "deg/s")):
                 cell.configure(text=f"{p.format_mdeg(value):>10} {unit}")
 
-        note = f"{st.targets_sent} targets sent"
+        note = ("the Pico is flying its built-in flight" if st.pico_replay
+                else f"{st.targets_sent} targets sent")
         if getattr(sample, "clamped", False):
             # Said plainly, because the error will not close and the reason
             # is not the antenna's fault.
@@ -1280,6 +1292,10 @@ class App:
             widget.state(["!disabled"] if manual or moving else ["disabled"])
         for widget in (self.m3_az_rate, self.m3_el_rate, self.m3_span):
             widget.state(["!disabled"] if moving else ["disabled"])
+        # The Pico's built-in flight runs at its own rate, so there is no
+        # targets/sec to choose.
+        self.m3_hz.state(["disabled"] if self.m3_source.get() == "replay"
+                         else ["!disabled"])
         # Sending one, though, needs something armed to send it to.
         self.b_point.state(["!disabled"] if manual and st.tracking
                            else ["disabled"])

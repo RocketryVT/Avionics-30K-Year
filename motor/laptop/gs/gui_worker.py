@@ -130,6 +130,9 @@ class State:
     # is what the window shows instead.
     tracking: bool = False
     source_name: str = ""
+    # True when the source is the Pico's built-in flight, so no targets are
+    # sent from here and "0 targets sent" is not a fault.
+    pico_replay: bool = False
     targets_sent: int = 0
     sample: object | None = None  # a tracking.Sample
 
@@ -155,6 +158,8 @@ class State:
             return f"not connected{': ' + self.error if self.error else ''}"
         if self.rebooted:
             return "the Pico restarted - re-zero before moving"
+        if self.tracking and self.pico_replay:
+            return "TRACKING - the Pico is flying its built-in flight"
         if self.tracking:
             where = f" from {self.source_name}" if self.source_name else ""
             return (f"TRACKING{where} - {self.targets_sent} targets sent")
@@ -365,7 +370,9 @@ class MotorWorker(threading.Thread):
                        span_deg: float = 30.0) -> None:
         """Arm tracking and start sending targets.
 
-        `kind` is "manual", "moving" or "sim". The rates and span are only
+        `kind` is "manual", "moving", "sim" (a flight worked out here and
+        sent as targets) or "replay" (the flight built into the Pico's
+        firmware, which sends nothing from here). The rates and span are only
         used by "moving", which sets off from az_deg/el_deg. The source is
         built here, on the worker's thread, because that is the only thread
         allowed to touch it afterwards.
@@ -698,6 +705,8 @@ class MotorWorker(threading.Thread):
                                      el_rate_dps, span_deg)
         elif kind == "sim":
             source = tg.SimSource.rocket(hz=hz)
+        elif kind == "replay":
+            source = tg.PicoReplaySource()
         else:
             self._emit(EVENT_NOTE, f"no source called {kind!r}")
             return
@@ -710,9 +719,15 @@ class MotorWorker(threading.Thread):
         self._source = source
         self._loop = loop
         self._set_state(tracking=True, source_name=source.name,
+                        pico_replay=source.pico_replay,
                         targets_sent=0, sample=None)
-        self._emit(EVENT_NOTE,
-                   f"tracking armed from {source.name} at {hz:g} Hz")
+        if source.pico_replay:
+            self._emit(EVENT_NOTE,
+                       "tracking armed - the Pico is flying its built-in "
+                       "flight, nothing is sent from here")
+        else:
+            self._emit(EVENT_NOTE,
+                       f"tracking armed from {source.name} at {hz:g} Hz")
 
     def _stop_tracking(self, why: str | None) -> None:
         """Disarm and let the loop go. Safe when there is nothing running."""
@@ -759,10 +774,15 @@ class MotorWorker(threading.Thread):
         # in the stream. Following it rather than arguing keeps the window
         # showing what the machine is actually doing.
         if sample.trk is not None and not sample.trk.armed:
+            # For the Pico's own flight this is the normal ending: it runs
+            # out of positions and its watchdog disarms.
+            replay = self._source is not None and self._source.pico_replay
             self._loop = None
             self._source = None
             self._set_state(tracking=False, sample=sample)
             self._emit(EVENT_NOTE,
+                       "the Pico stopped tracking - its built-in flight "
+                       "finished, or something stopped it" if replay else
                        "the Pico stopped tracking - no targets reached it, "
                        "or something stopped it")
             return

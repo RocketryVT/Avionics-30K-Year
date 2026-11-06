@@ -237,10 +237,11 @@ targets, and disarms when it finishes. Close the `motor>` prompt first - only
 one program can have the port open. (`track on` at the prompt only arms it,
 which is mostly useful for seeing the 1.5 second give-up happen.)
 
-The Pico can also supply its own: `track replay` at the prompt (or
-`TRACK,<id>,REPLAY` from a serial monitor) arms tracking and has the Pico
-fly the simulated flight built into its firmware, with nothing sent from the
-laptop. That one is a bench test. `track off`, `stop`, `estop`, or a target
+The Pico can also supply its own. In the window, pick mode 3, choose
+**the Pico's built-in flight**, and press **ARM tracking**. That arms
+tracking and has the Pico fly the simulated flight built into its firmware,
+with nothing sent from the laptop. (`track replay` at the prompt and
+`TRACK,<id>,REPLAY` from a serial monitor do the same.) That one is a bench test. `track off`, `stop`, `estop`, or a target
 from the laptop ends it. It is a different thing from `gs.track --replay`,
 which sends a recorded flight from the laptop. See
 [the tracker README](../tracker/README.md#run-the-replay).

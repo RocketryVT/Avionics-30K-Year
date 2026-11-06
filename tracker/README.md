@@ -30,6 +30,14 @@ The banner includes a `[motor] replay:` line that says whether the simulated fli
 
 ## Run the replay
 
+### From the window
+
+Run `py -m gs.gui` from `motor/laptop`. Zero both axes, switch to mode **3 track**, choose **the Pico's built-in flight**, and press **ARM tracking**. The target/actual readout fills in from the `TRK` stream. **disarm**, **STOP**, and **E-STOP** all end it early. When the flight ends, the window notes that the Pico stopped tracking.
+
+Mode 3 runs in `GEARED` mode, so the angles count the final gear pairs. The numbers below were taken in `DIRECT` mode from a serial monitor, as described next.
+
+### From a serial monitor
+
 For the **Pico-only bench test**, leave `DIRECT` gear mode active. In the serial monitor, set the line ending to **LF** or **CRLF** and send these one line at a time:
 
 ```text
