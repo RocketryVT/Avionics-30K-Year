@@ -99,7 +99,7 @@ New machine? Do `docs/SETUP.md` first.
 | `save` | Keep the settings, so a restart comes back with them |
 | `defaults` | Back to the numbers in `motor_config.hpp` (then `save` to keep that) |
 | `gear [on\|off]` | Whether the final gear pair is counted. See **Gear modes** |
-| `track [on\|off]` | Arm or disarm chasing a target. See **Tracking** |
+| `track [on\|off\|replay]` | Arm or disarm chasing a target, or fly the built-in simulated flight. See **Tracking** |
 | `pin <gpio> <0\|1>` | Hold a pin high or low, for a multimeter (GP4-7, GP12-15). Any motor pin (GP4-7) is a step line, so it costs that axis its zero |
 | `sweep [axis=az] [angle=45] [speeds=1,5,90] [pause]` | One angle at each speed in turn |
 | `random [axis=az] [count=10] [speed=5] [seed=N] [pause]` | Random angles inside the limits |
@@ -236,6 +236,14 @@ terminal it is `py -m gs.track`, which arms tracking itself, sends the
 targets, and disarms when it finishes. Close the `motor>` prompt first - only
 one program can have the port open. (`track on` at the prompt only arms it,
 which is mostly useful for seeing the 1.5 second give-up happen.)
+
+The Pico can also supply its own: `track replay` at the prompt (or
+`TRACK,<id>,REPLAY` from a serial monitor) arms tracking and has the Pico
+fly the simulated flight built into its firmware, with nothing sent from the
+laptop. That one is a bench test. `track off`, `stop`, `estop`, or a target
+from the laptop ends it. It is a different thing from `gs.track --replay`,
+which sends a recorded flight from the laptop. See
+[the tracker README](../tracker/README.md#run-the-replay).
 
 | | |
 | --- | --- |

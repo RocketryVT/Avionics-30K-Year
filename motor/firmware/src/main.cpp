@@ -59,11 +59,9 @@
 #include "pointing.hpp"
 #include "motor_interface.hpp"
 
-#ifdef GS_ENABLE_REPLAY
 #include "replay_config.hpp"
 #include "replay_data.hpp"
 #include "replay_position.hpp"
-#endif
 
 constexpr uint32_t HEARTBEAT_PERIOD_MS = 5000;
 
@@ -98,12 +96,18 @@ static AxisSpec g_boot_el   = EL_SPEC;
 static bool g_tracking = false;
 static absolute_time_t g_last_target = {};
 
-#ifdef GS_ENABLE_REPLAY
-static bool g_replay_running = false;
+// True while the built-in simulated flight is feeding the targets. Only
+// TRACK REPLAY sets it; TRACK ON/OFF, STOP, ESTOP, a gear change, the
+// watchdog, a TARGET from the laptop and the end of the data all clear it.
+static bool g_replay_on = false;
 static absolute_time_t g_replay_start = {};
 static absolute_time_t g_next_replay_update = {};
 static uint16_t g_replay_command_id = 1;
-#endif
+
+// The replay is pointed at from this station position, so without one it
+// cannot run. Both are set in replay_config.hpp.
+static constexpr bool REPLAY_READY =
+    REPLAY_STATION.has_value() && REPLAY_GEOID_SEPARATION_M.has_value();
 
 static Stepper g_az(g_az_spec, PIN_AZ_CW, PIN_AZ_CCW);
 static Stepper g_el(g_el_spec, PIN_EL_CW, PIN_EL_CCW);
@@ -261,6 +265,13 @@ static void print_banner(LoadResult loaded)
 
     printf("[motor] tracking %s\n", g_tracking ? "ARMED" : "off");
 
+    if (REPLAY_READY) {
+        printf("[motor] replay: %lu s simulated flight built in - TRACK REPLAY plays it\n",
+               static_cast<unsigned long>(REPLAY_SAMPLES.back().timeSeconds));
+    } else {
+        printf("[motor] replay: no station set in replay_config.hpp - TRACK REPLAY refused\n");
+    }
+
     printf("[motor] NOT ZEROED - send ZERO before any MOVE\n");
 }
 
@@ -283,6 +294,8 @@ static MachineState snapshot()
     s.el_pos_steps = g_el.pos_steps();
     s.gear         = g_gear;
     s.tracking     = g_tracking;
+    s.replaying    = g_replay_on;
+    s.replay_ready = REPLAY_READY;
     s.az_target_steps = g_az.target_steps();
     s.el_target_steps = g_el.target_steps();
     s.az_mdps      = g_az.velocity_mdps();
@@ -366,19 +379,28 @@ static void apply(const Decision &d)
     case Act::SaveSettings:
         break;  // already done in handle(), before the reply
     case Act::SetTrack:
-        g_tracking = d.track_on;
-#ifdef GS_ENABLE_REPLAY
-        g_replay_running = false;
-#endif
-        if (d.track_on) {
+        // Arm only on the way in: switching between ON and REPLAY while
+        // already armed changes where targets come from, and re-arming
+        // would throw away the chase in progress.
+        if (d.track_on && !g_tracking) {
             g_az.arm_chase();
             g_el.arm_chase();
             // Counted from here, so arming does not immediately look like a
             // dropout to the watchdog.
             g_last_target = get_absolute_time();
-        } else {
+        } else if (!d.track_on) {
             g_az.disarm_chase();
             g_el.disarm_chase();
+        }
+        g_tracking = d.track_on;
+
+        // REPLAY starts the simulated flight from time zero; anything else
+        // ends it.
+        g_replay_on = d.track_replay;
+        if (g_replay_on) {
+            g_replay_start       = get_absolute_time();
+            g_next_replay_update = g_replay_start;
+            g_replay_command_id  = 1;
         }
         break;
     case Act::SetTarget:
@@ -450,15 +472,24 @@ static void poll_input()
 
         const LineReader::Result r = g_reader.feed(static_cast<char>(ch));
         if (r == LineReader::Result::Line) {
-            handle(parse_command(g_reader.line()));
+            const Command c = parse_command(g_reader.line());
+            // A target from the laptop means the laptop is steering, so the
+            // simulated flight stops rather than fight it for the axes.
+            if (c.verb == Verb::Target && g_replay_on) {
+                g_replay_on = false;
+                send_if_room(static_cast<size_t>(snprintf(
+                    g_out, sizeof(g_out),
+                    "[motor] replay stopped - the laptop sent a target\n")));
+            }
+            handle(c);
         } else if (r == LineReader::Result::TooLong) {
             send(format_err(g_out, sizeof(g_out), 0, ErrCode::TooLong, ""));
         }
     }
 }
 
-// Unused until a GPS source other than the replay is wired in.
-[[maybe_unused]]
+// Point at a rocket position, as if it were a TARGET. Only the replay calls
+// this so far; the radio receiver will be the second caller.
 static void submitRocketPosition(const GPSPosition &rocket,
                                  const GPSPosition &station,
                                  uint16_t commandId)
@@ -476,26 +507,18 @@ static void submitRocketPosition(const GPSPosition &rocket,
     handle(*command);
 }
 
-#ifdef GS_ENABLE_REPLAY
+// Feed the next simulated position, while TRACK REPLAY is running.
 static void pollReplay(absolute_time_t now)
 {
-    // Stop supplying positions whenever tracking is disarmed.
-    if (!g_tracking) {
-        g_replay_running = false;
+    if (!g_replay_on) {
         return;
     }
 
-    // Both references must be configured before replay can start.
-    if (!REPLAY_STATION || !REPLAY_GEOID_SEPARATION_M) {
+    // Whatever disarmed tracking - STOP, ESTOP, a gear change, the
+    // watchdog - ends the replay with it.
+    if (!g_tracking || !REPLAY_READY) {
+        g_replay_on = false;
         return;
-    }
-
-    // The first call after arming starts the simulation clock.
-    if (!g_replay_running) {
-        g_replay_start       = now;
-        g_next_replay_update = now;
-        g_replay_command_id  = 1;
-        g_replay_running     = true;
     }
 
     // Return immediately if the next update is still in the future.
@@ -511,15 +534,19 @@ static void pollReplay(absolute_time_t now)
     const auto rocket =
         replayPositionAt(elapsedSeconds, *REPLAY_GEOID_SEPARATION_M);
 
-    // When the data ends, stop sending targets.
-    // The existing tracking watchdog will bring the motors to rest.
+    // When the data ends, stop sending targets. The tracking watchdog then
+    // brings the axes to rest, exactly as it would after a radio dropout.
     if (!rocket) {
+        g_replay_on = false;
+        send_if_room(static_cast<size_t>(snprintf(
+            g_out, sizeof(g_out),
+            "[motor] replay finished - tracking stops in %lu ms\n",
+            static_cast<unsigned long>(TRACK_TIMEOUT_MS))));
         return;
     }
 
     submitRocketPosition(*rocket, *REPLAY_STATION, g_replay_command_id++);
 }
-#endif
 
 // What the TRK stream says. Built from the steppers rather than from a
 // snapshot, because it is sent from the loop rather than in answer to a
@@ -628,9 +655,7 @@ int main()
                 static_cast<unsigned long>(TRACK_TIMEOUT_MS))));
         }
 
-#ifdef GS_ENABLE_REPLAY
         pollReplay(now);
-#endif
 
         // The tracking stream. Sent through send_if_room() because an axis
         // is turning - see the rule at the top of this file.

@@ -107,6 +107,7 @@ const char *err_name(ErrCode e)
     case ErrCode::Range:      return "range";
     case ErrCode::Flash:      return "flash";
     case ErrCode::NotTracking: return "track";
+    case ErrCode::NoReplay:    return "replay";
     }
     return "unknown";
 }

@@ -4,9 +4,11 @@ The tracker turns a rocket GPS fix and a ground-station reference into azimuth a
 
 Run the shell commands below from the **`Avionics-30K-Year` repository root**, where `tracker/` and `motor/` are siblings. The older standalone tracker checkout does not contain this integrated build.
 
-## Build and flash the replay firmware on macOS
+## Build and flash the firmware on macOS
 
-If `build/pico-mac` is already configured with replay enabled, this is the rebuild command after changing source or replay settings:
+There is one firmware, `gs_motor`. The simulated flight is always built in and only runs when you send `TRACK,<id>,REPLAY`, so the same image works for the bench test and for normal motor use.
+
+If `build/pico-mac` is already configured, this is the rebuild command after changing source or replay settings:
 
 ```bash
 cmake --build build/pico-mac --target gs_motor -j4
@@ -18,14 +20,13 @@ For a new build directory, install CMake (3.18 or newer), Ninja, the Arm GNU too
 cmake -S motor/firmware -B build/pico-mac -G Ninja \
     -DPICO_BOARD=pico2_w \
     -DPICO_SDK_PATH="$HOME/pico/pico-sdk" \
-    -DGS_ENABLE_REPLAY=ON \
     -DCMAKE_EXPORT_COMPILE_COMMANDS=ON
 cmake --build build/pico-mac --target gs_motor -j4
 ```
 
 The image is **`build/pico-mac/gs_motor.uf2`**. Hold **BOOTSEL** while connecting the Pico 2 W over USB, then copy that file to the mounted drive. The drive disappears when the Pico reboots. Open the Pico's USB serial port in VS Code's Serial Monitor to see the startup banner.
 
-`GS_ENABLE_REPLAY` is a cached CMake option and defaults to `OFF` in a new build. Use `ON` for this bench test. To return this build to normal motor firmware, rerun the configure command with `-DGS_ENABLE_REPLAY=OFF` and rebuild.
+The banner includes a `[motor] replay:` line that says whether the simulated flight is ready to play. The old `GS_ENABLE_REPLAY` option is gone. A build folder configured with it drops it the next time CMake runs.
 
 ## Run the replay
 
@@ -40,14 +41,17 @@ ZERO,3,ALL,0
 `SETTINGS` and `LIMITS` show the active gear mode, travel limits, and controller settings. After `ACK,3,ZERO`, start the replay:
 
 ```text
-TRACK,4,ON
+TRACK,4,REPLAY
 ```
 
-An accepted `TRACK ON` starts the replay at simulation time zero. The Pico interpolates the trajectory and submits a new position every **200 ms (5 Hz)**. Keep the serial monitor open to capture the `TRK` lines. To stop early, send `TRACK,5,OFF`. If replay is already running, stop it and wait for the axes to come to rest before zeroing and starting again.
+An accepted `TRACK REPLAY` arms tracking and starts the replay at simulation time zero. Its reply is the same `TRK,4,ON,...` that `TRACK ON` gives. The Pico interpolates the trajectory and submits a new position every **200 ms (5 Hz)**. Keep the serial monitor open to capture the `TRK` lines. To stop early, send `TRACK,5,OFF`. `STOP`, `ESTOP`, `TRACK ON`, or a `TARGET` from the laptop also ends it. If replay is already running, stop it and wait for the axes to come to rest before zeroing and starting again.
 
-The current trajectory runs for about **156 seconds**. Once it runs out of positions, the target watchdog disarms tracking after 1,500 ms without an accepted target. A normal ending shows `TRK,0,OFF,...`, the message below, and then `IDLE` status:
+`TRACK ON` never starts the replay. It arms tracking for targets sent by the laptop, so arming for a real launch cannot play the simulated flight. From the `py -m gs.motor` prompt, `track replay` does the same as `TRACK,<id>,REPLAY`.
+
+The current trajectory runs for about **156 seconds**. Once it runs out of positions, the target watchdog disarms tracking after 1,500 ms without an accepted target. A normal ending shows the first message below, then `TRK,0,OFF,...`, the second message, and then `IDLE` status:
 
 ```text
+[motor] replay finished - tracking stops in 1500 ms
 [motor] no target for 1500 ms - tracking stopped
 ```
 
@@ -124,7 +128,7 @@ cmake -S tools/gps_capture -B build/gps-capture -G Ninja \
 cmake --build build/gps-capture --target gps_capture -j4
 ```
 
-Flash `build/gps-capture/gps_capture.uf2` and open the USB serial monitor. Once valid GGA fixes arrive, it prints latitude, longitude, and ellipsoidal altitude. The sentence collector frames NMEA text; the GGA parser validates the checksum and fix, converts coordinates to decimal degrees, and adds geoid separation to the reported sea-level altitude. Flash `gs_motor.uf2` again to return to the replay firmware.
+Flash `build/gps-capture/gps_capture.uf2` and open the USB serial monitor. Once valid GGA fixes arrive, it prints latitude, longitude, and ellipsoidal altitude. The sentence collector frames NMEA text; the GGA parser validates the checksum and fix, converts coordinates to decimal degrees, and adds geoid separation to the reported sea-level altitude. Flash `gs_motor.uf2` again to return to the motor firmware.
 
 ## Radio integration status
 
@@ -136,5 +140,6 @@ Finish the codec on the desktop, then send and receive known packets between the
 
 - **`SDK location was not specified`**: configure with `-DPICO_SDK_PATH` pointing to the installed SDK.
 - **Serial commands get no response**: enable LF or CRLF. Send a blank line to flush buffered text, then resend the full command. `ZERO` alone is not the raw serial command; use `ZERO,3,ALL,0` for the Pico-only test.
-- **Tracking arms and stops after about 1.5 seconds**: check that you flashed the replay-enabled build, both reference values are set, and the geometry produces valid pointing angles.
+- **Tracking arms and stops after about 1.5 seconds**: check that you sent `TRACK,<id>,REPLAY` and not `TRACK,<id>,ON`, which waits for targets from the laptop. If it still stops, check that the geometry produces valid pointing angles.
+- **`ERR,<id>,replay`**: `replay_config.hpp` is missing the station position or the geoid separation. Set both and rebuild.
 - **The editor flags includes or `std::optional`**: check that you opened `Avionics-30K-Year`, that the editor uses C++17, and that the compile database matches the build (`tracker/build/compile_commands.json` for the desktop, `build/pico-mac/compile_commands.json` for the motor firmware). Reload the VS Code window if the diagnostics are stale.
