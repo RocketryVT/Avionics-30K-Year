@@ -6,11 +6,19 @@
 #
 # The build itself stays in WSL, out of OneDrive. Only the finished
 # gs_motor.uf2 is copied back into firmware/uf2/, where Windows can see it.
+# ----------------------------------------------------------------------------
+# Language settings
+# ----------------------------------------------------------------------------
+
 cmake_minimum_required(VERSION 3.18)
 
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
+
+# ----------------------------------------------------------------------------
+# Pico board, toolchain, and SDK initialization
+# ----------------------------------------------------------------------------
 
 # Pico 2 W (RP2350). Must be set before the SDK is pulled in, because that is
 # where the SDK picks the cross-compiler for this chip.
@@ -56,7 +64,7 @@ endif()
 message(STATUS "gs_motor version stamp: ${GS_VERSION}")
 
 # ----------------------------------------------------------------------------
-# gs_motor
+# Motor firmware executable and source files
 # ----------------------------------------------------------------------------
 add_executable(gs_motor
     src/main.cpp
@@ -69,23 +77,72 @@ add_executable(gs_motor
     src/settings.cpp
     src/settings_flash.cpp)
 
+# ----------------------------------------------------------------------------
+# Pointing and motor command adapter integration
+# ----------------------------------------------------------------------------
+# Include the tracker libraries without its desktop executable or tests.
+set(TRACKER_BUILD_DESKTOP OFF)
+
+add_subdirectory(
+    "${CMAKE_CURRENT_SOURCE_DIR}/../../tracker"
+    "${CMAKE_CURRENT_BINARY_DIR}/tracker"
+)
+
+target_link_libraries(gs_motor PRIVATE motor_interface)
+
+# Optional simulated GPS replay for bench testing.
+option(GS_ENABLE_REPLAY "Build the simulated GPS bench replay" OFF)
+
+if(GS_ENABLE_REPLAY)
+    set(REPLAY_DIR
+        "${CMAKE_CURRENT_SOURCE_DIR}/../../tracker/tests/bench_tests/replay"
+    )
+
+    target_sources(gs_motor PRIVATE
+        "${REPLAY_DIR}/replay_position.cpp"
+    )
+
+    target_include_directories(gs_motor PRIVATE "${REPLAY_DIR}")
+    target_compile_definitions(gs_motor PRIVATE GS_ENABLE_REPLAY=1)
+endif()
+
+# ----------------------------------------------------------------------------
+# Firmware identity and compiler warnings
+# ----------------------------------------------------------------------------
+
 target_compile_definitions(gs_motor PRIVATE
     GS_TARGET_NAME=\"gs_motor\"
     GS_VERSION=\"${GS_VERSION}\")
 
 target_compile_options(gs_motor PRIVATE -Wall -Wextra)
 
+# ----------------------------------------------------------------------------
+# Pico hardware dependencies
+# ----------------------------------------------------------------------------
+
 target_link_libraries(gs_motor PRIVATE
     pico_stdlib
     hardware_flash
     pico_flash)
 
+# ----------------------------------------------------------------------------
+# USB console configuration
+# ----------------------------------------------------------------------------
+
 # The laptop talks to the Pico over USB. The UART console stays off.
 pico_enable_stdio_usb(gs_motor 1)
 pico_enable_stdio_uart(gs_motor 0)
 
+# ----------------------------------------------------------------------------
+# Firmware output files
+# ----------------------------------------------------------------------------
+
 # gs_motor.uf2 for drag-and-drop flashing, plus .elf/.map for debugging.
 pico_add_extra_outputs(gs_motor)
+
+# ----------------------------------------------------------------------------
+# Copy the finished UF2 to the firmware output folder
+# ----------------------------------------------------------------------------
 
 # Copy the .uf2 into firmware/uf2/. This has to come after
 # pico_add_extra_outputs, whose last step is writing the .uf2.

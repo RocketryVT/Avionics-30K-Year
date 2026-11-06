@@ -56,6 +56,14 @@
 #include "settings.hpp"
 #include "settings_flash.hpp"
 #include "stepper.hpp"
+#include "pointing.hpp"
+#include "motor_interface.hpp"
+
+#ifdef GS_ENABLE_REPLAY
+#include "replay_config.hpp"
+#include "replay_data.hpp"
+#include "replay_position.hpp"
+#endif
 
 constexpr uint32_t HEARTBEAT_PERIOD_MS = 5000;
 
@@ -89,6 +97,13 @@ static AxisSpec g_boot_el   = EL_SPEC;
 // minutes stale.
 static bool g_tracking = false;
 static absolute_time_t g_last_target = {};
+
+#ifdef GS_ENABLE_REPLAY
+static bool g_replay_running = false;
+static absolute_time_t g_replay_start = {};
+static absolute_time_t g_next_replay_update = {};
+static uint16_t g_replay_command_id = 1;
+#endif
 
 static Stepper g_az(g_az_spec, PIN_AZ_CW, PIN_AZ_CCW);
 static Stepper g_el(g_el_spec, PIN_EL_CW, PIN_EL_CCW);
@@ -352,6 +367,9 @@ static void apply(const Decision &d)
         break;  // already done in handle(), before the reply
     case Act::SetTrack:
         g_tracking = d.track_on;
+#ifdef GS_ENABLE_REPLAY
+        g_replay_running = false;
+#endif
         if (d.track_on) {
             g_az.arm_chase();
             g_el.arm_chase();
@@ -438,6 +456,70 @@ static void poll_input()
         }
     }
 }
+
+// Unused until a GPS source other than the replay is wired in.
+[[maybe_unused]]
+static void submitRocketPosition(const GPSPosition &rocket,
+                                 const GPSPosition &station,
+                                 uint16_t commandId)
+{
+    auto angles = calculatePointingAngles(rocket, station);
+    if (!angles.has_value()) {
+        return;
+    }
+
+    auto command = makeMotorTarget(*angles, commandId);
+    if (!command.has_value()) {
+        return;
+    }
+
+    handle(*command);
+}
+
+#ifdef GS_ENABLE_REPLAY
+static void pollReplay(absolute_time_t now)
+{
+    // Stop supplying positions whenever tracking is disarmed.
+    if (!g_tracking) {
+        g_replay_running = false;
+        return;
+    }
+
+    // Both references must be configured before replay can start.
+    if (!REPLAY_STATION || !REPLAY_GEOID_SEPARATION_M) {
+        return;
+    }
+
+    // The first call after arming starts the simulation clock.
+    if (!g_replay_running) {
+        g_replay_start       = now;
+        g_next_replay_update = now;
+        g_replay_command_id  = 1;
+        g_replay_running     = true;
+    }
+
+    // Return immediately if the next update is still in the future.
+    if (absolute_time_diff_us(now, g_next_replay_update) > 0) {
+        return;
+    }
+
+    g_next_replay_update = delayed_by_ms(now, REPLAY_UPDATE_PERIOD_MS);
+
+    const double elapsedSeconds =
+        absolute_time_diff_us(g_replay_start, now) / 1'000'000.0;
+
+    const auto rocket =
+        replayPositionAt(elapsedSeconds, *REPLAY_GEOID_SEPARATION_M);
+
+    // When the data ends, stop sending targets.
+    // The existing tracking watchdog will bring the motors to rest.
+    if (!rocket) {
+        return;
+    }
+
+    submitRocketPosition(*rocket, *REPLAY_STATION, g_replay_command_id++);
+}
+#endif
 
 // What the TRK stream says. Built from the steppers rather than from a
 // snapshot, because it is sent from the loop rather than in answer to a
@@ -545,6 +627,10 @@ int main()
                 "[motor] no target for %lu ms - tracking stopped\n",
                 static_cast<unsigned long>(TRACK_TIMEOUT_MS))));
         }
+
+#ifdef GS_ENABLE_REPLAY
+        pollReplay(now);
+#endif
 
         // The tracking stream. Sent through send_if_room() because an axis
         // is turning - see the rule at the top of this file.

@@ -20,6 +20,7 @@ venv/
 # Results files written by `py -m gs.motor --log`. Test data doesn't belong
 # in git.
 /*.csv
+/motor/*.csv
 logs/
 
 # Editors and OS clutter
