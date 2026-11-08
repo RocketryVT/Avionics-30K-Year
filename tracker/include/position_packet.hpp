@@ -35,7 +35,7 @@ struct PositionPacket
     std::uint32_t sequence = 0;
 
     /// Transmitter uptime when this fix was accepted, in milliseconds.
-    std::uint32_t timestampMs = 0;
+    std::uint32_t timestamp = 0;
 
     /// Decimal-degree latitude/longitude and meters above the WGS84 ellipsoid.
     GPSPosition position{};
