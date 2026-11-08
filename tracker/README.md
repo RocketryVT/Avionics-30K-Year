@@ -50,7 +50,7 @@ The banner includes a `[motor] replay:` line that says whether the simulated fli
 
 ## Choose live GPS or radio replay
 
-[radio_config.hpp](include/radio_config.hpp) holds the common radio wiring, carrier frequency, output power, transmit start interval, completion timeout, and source/station settings for **both images**. The defaults remain 915 MHz, 10 dBm, a 200 ms start interval, and a 250 ms transmit timeout. The HAL and its timing guard still use SPI0. The source currently selects:
+[radio_config.hpp](include/radio_config.hpp) holds each board's radio SPI bus and wiring, plus the shared carrier frequency, output power, transmit start interval, completion timeout, and source/station settings for **both images**. The transmitter build selects the `RADIO_LINK_TRANSMITTER` wiring block; the motor receiver uses the other block. The defaults remain 915 MHz, 10 dBm, a 200 ms start interval, and a 250 ms transmit timeout. `RADIO_SPI_BUS` selects SPI0 (`0`) or SPI1 (`1`) for both the HAL and its timing guard; it must match that board's MISO, MOSI, and SCK pins. The source currently selects:
 
 ```cpp
 inline constexpr RadioPositionSource RADIO_POSITION_SOURCE =
@@ -93,7 +93,7 @@ Start with motor power disconnected to check telemetry and loop timing. Before a
    ```
 
    `START` is uppercase and requires a completed held-position transmission. If it says `Waiting for first held transmission`, wait and send `START` again. This is a local transmit-completion check, not confirmation that the ground antenna has settled.
-5. The transmitter interpolates the existing flight at the configured minimum start interval (200 ms by default). At the end of the roughly 156-second trajectory it prints `Replay finished; no new packets`. After 1500 ms without an accepted target, the ground watchdog disarms tracking and ramps the axes to rest. Reception returning does not re-arm tracking.
+5. The transmitter interpolates the existing flight at the configured minimum start interval (200 ms by default). At the end of the roughly 156-second trajectory it prints `Replay finished; no new packets`. After 15 seconds without an accepted target, the ground watchdog disarms tracking and ramps the axes to rest. Reception returning does not re-arm tracking.
 
 To stop early, send **`STOP` to the transmitter** to stop producing packets, or `TRACK,<id>,OFF`, `STOP,<id>`, or `ESTOP,<id>` to the ground console to stop motor tracking. Ground stop commands do not stop the transmitter's replay clock. The transmitter completes cleanup of any in-flight send.
 
@@ -161,11 +161,11 @@ An accepted `TRACK REPLAY` arms tracking and immediately starts the local flight
 
 `TRACK ON` selects radio targeting, using the GPS/replay selection compiled into both boards; it never starts the built-in local replay. From the `py -m gs.motor` prompt, `track replay` does the same as `TRACK,<id>,REPLAY`.
 
-The current trajectory runs for about **156 seconds**. Once it runs out of positions, the target watchdog disarms tracking after 1,500 ms without an accepted target. A normal ending shows the first message below, then `TRK,0,OFF,...`, the second message, and then `IDLE` status:
+The current trajectory runs for about **156 seconds**. Once it runs out of positions, the target watchdog disarms tracking after 15 seconds without an accepted target. A normal ending shows the first message below, then `TRK,0,OFF,...`, the second message, and then `IDLE` status:
 
 ```text
-[motor] replay finished - tracking stops in 1500 ms
-[motor] no target for 1500 ms - tracking stopped
+[motor] replay finished - tracking stops in 15000 ms
+[motor] no target for 15000 ms - tracking stopped
 ```
 
 For a test with motors connected, first verify the physical gear ratios, direction, and travel limits using the [motor setup and command guide](../motor/README.md). `DIRECT` counts gearbox-shaft angles; `GEARED` accounts for the configured final drive. Set the gear mode before zeroing. `ZERO` declares the current angle and does not move or home an axis. Use a known physical reference: azimuth zero faces true north and elevation zero is level.
@@ -241,9 +241,18 @@ Flash `build/gps-capture/gps_capture.uf2` and open the USB serial monitor. Once 
 
 [radio_link.cpp](src/radio_link.cpp) owns the shared radio hardware and bounded receive service; [radio_link.hpp](include/radio_link.hpp) exposes the interface. The modules are **RFM69HCW using FSK**, configured at **915 MHz and 10 dBm on the HCW high-power path** through RadioLib 7.8.1. That release's configuration frequency is in MHz.
 
-Both boards use SPI0 with MISO GP16, CS GP17, SCK GP18, MOSI GP19, DIO0 GP20, and RESET GP21. GPS TX connects to UART0 RX on GP1 (physical pin 2), at 115200 baud, 8N1, without hardware flow control. Radio power is 3V3 OUT with common ground. GPIO numbers differ from physical header numbers.
+The board-specific wiring in `radio_config.hpp` is:
 
-Preserve `RadioPicoHal`'s SPI timing guard: wait until SPI0 is no longer busy before releasing CS, hold for 2 us before raising CS, and delay 2 us after either CS transition. It fixed FIFO corruption on the bench. The default SPI clock is 500 kHz; synchronous extraction/restart work still needs motor-loop timing measurement. Initialization or receive-restart failure disables reception and leaves the motor console running.
+| Board | SPI bus | MISO | MOSI | SCK | CS | DIO0 | RESET | EN |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| Transmitter | SPI0 | GP16 | GP19 | GP18 | GP17 | GP20 | GP21 | Unconnected |
+| Motor receiver | SPI1 | GP8 | GP11 | GP10 | GP9 | GP27 | GP26 | GP28 |
+
+`RADIO_ENABLE_PIN` is optional: the motor receiver drives GP28 HIGH and waits `RADIO_ENABLE_SETTLE_MS` (10 ms) before initializing the radio. The transmitter uses `std::nullopt` and leaves EN uncontrolled.
+
+GPS TX connects to UART0 RX on GP1 (physical pin 2), at 115200 baud, 8N1, without hardware flow control. Radio power is 3V3 OUT with common ground. GPIO numbers differ from physical header numbers.
+
+Preserve `RadioPicoHal`'s SPI timing guard: wait until the configured SPI bus is no longer busy before releasing CS, hold for 2 us before raising CS, and delay 2 us after either CS transition. It fixed FIFO corruption on the bench. The default SPI clock is 500 kHz; synchronous extraction/restart work still needs motor-loop timing measurement. Initialization or receive-restart failure disables reception and leaves the motor console running.
 
 The encoder/decoder in [position_packet.cpp](src/position_packet.cpp) are implemented and tested. The payload is exactly 22 bytes, serialized field by field:
 
@@ -259,7 +268,7 @@ The encoder/decoder in [position_packet.cpp](src/position_packet.cpp) are implem
 
 The valid flag is required; unknown flags are rejected. The altitude flag does not change units or reference, and no barometer is integrated. Raw C++ struct memory is never transmitted. GGA fixes use ellipsoidal height = MSL altitude + signed geoid separation; simulation samples use the same conversion through `replayPositionAt()`.
 
-The ground station requires both sequence and fix-acceptance timestamp to advance. It accepts sequence gaps, rejects duplicates/backward values, and uses unsigned modular comparisons for normal counter wrap; jumps of half the 32-bit range or more are rejected. Each pending position is consumed once and discarded if it waits more than **500 ms after decoding** before target submission. Only an accepted motor target refreshes the **1500 ms watchdog**. Malformed packets, ordering failures, and undefined pointing do not keep tracking alive.
+The ground station requires both sequence and fix-acceptance timestamp to advance. It accepts sequence gaps, rejects duplicates/backward values, and uses unsigned modular comparisons for normal counter wrap; jumps of half the 32-bit range or more are rejected. Each pending position is consumed once and discarded if it waits more than **500 ms after decoding** before target submission. Only an accepted motor target refreshes the **15-second watchdog**. Malformed packets, ordering failures, and undefined pointing do not keep tracking alive.
 
 The 500 ms check measures receiver-side pending time, not GPS fix age or radio latency. Packet timestamps are transmitter uptime, not GPS UTC, and the board clocks are not synchronized. Do not subtract them to claim absolute age. Version 1 has no boot/session identifier: after a known transmitter reboot, explicitly reset ordering with ground `TRACK OFF` before re-arming. Silence alone never resets ordering or re-arms tracking.
 
@@ -270,7 +279,7 @@ The 500 ms check measures receiver-side pending time, not GPS fix age or radio l
 - **`SDK location was not specified`**: configure with `-DPICO_SDK_PATH` pointing to the installed SDK.
 - **Serial commands get no response**: open the correct board's USB monitor and enable LF or CRLF. Both applications wait for USB at startup. Transmitter replay commands are uppercase `START` and `STOP`; ground commands include their numeric ID.
 - **`RX,ON` but no movement or `tgt` stays unchanged**: reception can run while tracking is off. Check the `TRK` arm state, selected target owner, and station/pointing validity. `ok` counts positions, not motor targets or measured movement.
-- **Tracking stops after about 1.5 seconds**: the watchdog saw no accepted target. For radio replay use ground `TRACK ON` and the transmitting board; for local replay use ground `TRACK REPLAY`. Check reception, ordering, source ownership, and valid pointing geometry.
+- **Tracking stops after about 15 seconds**: the watchdog saw no accepted target. For radio replay use ground `TRACK ON` and the transmitting board; for local replay use ground `TRACK REPLAY`. Check reception, ordering, source ownership, and valid pointing geometry.
 - **`START` is ignored or refused**: send it to the transmitter with a newline. Wait for one successful held-position transmission. A finished/stopped replay requires a transmitter reboot; reset ground ordering with `TRACK OFF` afterward.
 - **Packets are rejected after a transmitter reboot**: disarm, wait for rest, and send `TRACK OFF` once the rebooted transmitter is running, then explicitly re-arm. Sequence/timestamp rollback is not an automatic session reset.
 - **`RX,OFF` with nonzero `e`**: radio initialization or receive restart failed. Check radio wiring and restart the board after fixing the cause; firmware does not repeatedly initialize the radio in the motion loop.
