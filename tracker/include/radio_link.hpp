@@ -94,7 +94,7 @@ RadioTransmitResult startPositionTransmit(
  *
  * @param tx State of the transmission being serviced.
  * @return Idle while waiting, or Sent/TimedOut after attempting cleanup.
- * @note Completion or the 250 ms timeout clears busy. Failed cleanup sets faulted.
+ * @note Completion or the configured timeout clears busy. Failed cleanup sets faulted.
  */
 RadioTransmitResult checkTransmit(RadioTransmitState &tx);
 

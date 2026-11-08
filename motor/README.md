@@ -243,7 +243,7 @@ targets, and disarms when it finishes. Close the `motor>` prompt first - only
 one program can have the port open. A USB `TARGET` takes ownership from radio
 and local replay; an explicit `TRACK ON` selects radio again. Keep the radio
 transmitter off for laptop-only motor tests. Radio arming still requires the
-station selected in `radio_tracking_config.hpp` to be configured.
+station selected in `radio_config.hpp` to be configured.
 
 The Pico can also supply its own. In the window, pick mode 3, choose
 **the Pico's built-in flight**, and press **ARM tracking**. That arms

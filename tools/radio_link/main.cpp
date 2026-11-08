@@ -10,7 +10,7 @@
 #include "position_packet.hpp"
 #include "radio_link.hpp"
 #include "sentence_collector.hpp"
-#include "radio_tracking_config.hpp"
+#include "radio_config.hpp"
 #include "line_reader.hpp"
 #include "replay_config.hpp"
 #include "replay_position.hpp"
@@ -21,8 +21,6 @@
 
 namespace
 {
-    constexpr unsigned TRANSMIT_PERIOD_MS = 200;
-
     constexpr unsigned GPS_BAUD = 115200;
     constexpr unsigned GPS_RX_PIN = 1; // Physical header pin 2.
 }
@@ -200,7 +198,7 @@ void runTransmitter(SentenceCollector collector)
         if (tx.faulted)
             return;
 
-        // Keep sends separate and leave at least 200 ms between their starts.
+        // Keep sends separate and enforce the configured minimum start interval.
         if (!tx.busy && time_reached(nextTransmit))
         {
             if constexpr (RADIO_POSITION_SOURCE == RadioPositionSource::Replay)

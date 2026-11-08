@@ -50,7 +50,7 @@ The banner includes a `[motor] replay:` line that says whether the simulated fli
 
 ## Choose live GPS or radio replay
 
-[radio_tracking_config.hpp](include/radio_tracking_config.hpp) selects the source for **both images**. It currently selects:
+[radio_config.hpp](include/radio_config.hpp) holds the common radio wiring, carrier frequency, output power, transmit start interval, completion timeout, and source/station settings for **both images**. The defaults remain 915 MHz, 10 dBm, a 200 ms start interval, and a 250 ms transmit timeout. The HAL and its timing guard still use SPI0. The source currently selects:
 
 ```cpp
 inline constexpr RadioPositionSource RADIO_POSITION_SOURCE =
@@ -93,7 +93,7 @@ Start with motor power disconnected to check telemetry and loop timing. Before a
    ```
 
    `START` is uppercase and requires a completed held-position transmission. If it says `Waiting for first held transmission`, wait and send `START` again. This is a local transmit-completion check, not confirmation that the ground antenna has settled.
-5. The transmitter interpolates the existing flight at a minimum 200 ms start interval. At the end of the roughly 156-second trajectory it prints `Replay finished; no new packets`. After 1500 ms without an accepted target, the ground watchdog disarms tracking and ramps the axes to rest. Reception returning does not re-arm tracking.
+5. The transmitter interpolates the existing flight at the configured minimum start interval (200 ms by default). At the end of the roughly 156-second trajectory it prints `Replay finished; no new packets`. After 1500 ms without an accepted target, the ground watchdog disarms tracking and ramps the axes to rest. Reception returning does not re-arm tracking.
 
 To stop early, send **`STOP` to the transmitter** to stop producing packets, or `TRACK,<id>,OFF`, `STOP,<id>`, or `ESTOP,<id>` to the ground console to stop motor tracking. Ground stop commands do not stop the transmitter's replay clock. The transmitter completes cleanup of any in-flight send.
 
@@ -274,6 +274,6 @@ The 500 ms check measures receiver-side pending time, not GPS fix age or radio l
 - **`START` is ignored or refused**: send it to the transmitter with a newline. Wait for one successful held-position transmission. A finished/stopped replay requires a transmitter reboot; reset ground ordering with `TRACK OFF` afterward.
 - **Packets are rejected after a transmitter reboot**: disarm, wait for rest, and send `TRACK OFF` once the rebooted transmitter is running, then explicitly re-arm. Sequence/timestamp rollback is not an automatic session reset.
 - **`RX,OFF` with nonzero `e`**: radio initialization or receive restart failed. Check radio wiring and restart the board after fixing the cause; firmware does not repeatedly initialize the radio in the motion loop.
-- **`ERR,<id>,station,unset or invalid`**: live GPS mode needs a verified finite station position in `radio_tracking_config.hpp`. Do not use the synthetic replay station for deployment.
+- **`ERR,<id>,station,unset or invalid`**: live GPS mode needs a verified finite station position in `radio_config.hpp`. Do not use the synthetic replay station for deployment.
 - **`ERR,<id>,replay`**: `replay_config.hpp` is missing the station position or the geoid separation. Set both and rebuild.
 - **The editor flags includes or `std::optional`**: check that you opened `Avionics-30K-Year`, that the editor uses C++17, and that the compile database matches the build (`tracker/build/compile_commands.json` for the desktop, `build/pico-mac/compile_commands.json` for the motor firmware). Reload the VS Code window if the diagnostics are stale.

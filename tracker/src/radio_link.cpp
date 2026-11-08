@@ -1,4 +1,5 @@
 #include "radio_link.hpp"
+#include "radio_config.hpp"
 
 #include <RadioLib.h>
 
@@ -6,20 +7,6 @@
 
 namespace
 {
-    // SPI0: physical header pins 21, 25, and 24.
-    constexpr unsigned RADIO_MISO_PIN = 16;
-    constexpr unsigned RADIO_MOSI_PIN = 19;
-    constexpr unsigned RADIO_SCK_PIN = 18;
-
-    // Physical header pins 22, 26, and 27.
-    constexpr unsigned RADIO_CS_PIN = 17;
-    constexpr unsigned RADIO_DIO0_PIN = 20;
-    constexpr unsigned RADIO_RESET_PIN = 21;
-
-    constexpr float RADIO_FREQUENCY_MHZ = 915.0f;
-    constexpr int RADIO_POWER_DBM = 10;
-    constexpr unsigned TRANSMIT_TIMEOUT_MS = 250;
-
     class RadioPicoHal : public PicoHal
     {
     public:

@@ -61,7 +61,7 @@
 #include "pointing.hpp"
 #include "motor_interface.hpp"
 #include "radio_link.hpp"
-#include "radio_tracking_config.hpp"
+#include "radio_config.hpp"
 
 #include "replay_config.hpp"
 #include "replay_data.hpp"
