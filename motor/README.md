@@ -194,7 +194,7 @@ Three things about it are worth knowing before you arm it:
   does not know where the gimbal can point, so clamping keeps the antenna
   pointing as close as it can and lets it pick the rocket up again by itself.
 
-- **If targets stop arriving, it gives up.** No target for 1.5 seconds and
+- **If targets stop arriving, it gives up.** No target for 15 seconds and
   both axes ramp to rest and stay there until something arms tracking again.
   That is what a radio dropout or a closed laptop looks like from the Pico's
   side, and it is what pays for clamping rather than refusing.

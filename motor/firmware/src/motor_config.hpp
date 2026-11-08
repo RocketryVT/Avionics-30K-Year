@@ -166,11 +166,8 @@ constexpr int32_t DEADBAND_MAX_MDEG = 5000;  // 5   deg
 // it ends. A target is not, so without a watchdog a dropout would leave the
 // antenna driving at an angle that was right minutes ago.
 //
-// It has to be comfortably longer than the gap between fixes, or an ordinary
-// quiet moment would look like a failure. 1.5 s suits anything from about
-// 1 Hz upwards. (Last year ignored IMU data older than 250 ms, which is the
-// same idea at a much higher data rate.)
-constexpr uint32_t TRACK_TIMEOUT_MS = 1500;
+// Allow up to 15 seconds without an accepted target before disarming.
+constexpr uint32_t TRACK_TIMEOUT_MS = 15000;
 
 // ----------------------------------------------------------------------------
 // Steps per degree
