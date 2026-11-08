@@ -44,7 +44,7 @@ struct PositionPacket
 /**
  * @brief Holds the fixed 22-byte payload defined for radio transmission.
  *
- * @details The planned layout is version at byte 0, flags at byte 1, sequence
+ * @details The layout is version at byte 0, flags at byte 1, sequence
  *          at bytes 2-5, transmitter timestamp at bytes 6-9, latitude at bytes
  *          10-13, longitude at bytes 14-17, and altitude at bytes 18-21.
  *          Multi-byte fields use big-endian order. Latitude and longitude are
@@ -57,28 +57,23 @@ using PositionPacketBytes =
     std::array<std::uint8_t, POSITION_PACKET_SIZE>;
 
 /**
- * @brief Reserves the encoder interface for the defined position packet format.
+ * @brief Validates and encodes a position packet into the defined wire format.
  *
  * @param packet Position and metadata to validate and encode field by field.
- * @return No defined result yet; the implementation is pending. The intended
- *         result is encoded bytes, or std::nullopt for invalid input.
- *
- * @warning The current definition is an empty non-void stub. Do not call it
- *          until it has been implemented.
+ * @return Encoded bytes, or std::nullopt for invalid flags, coordinates,
+ *         non-finite values, or values outside the encoded numeric range.
  */
 std::optional<PositionPacketBytes> encodePositionPacket(
     const PositionPacket &packet);
 
 /**
- * @brief Reserves the decoder interface for the defined position packet format.
+ * @brief Decodes and validates a position packet from its transmitted bytes.
  *
  * @param data Pointer to the received payload bytes.
  * @param length Number of received bytes available at data.
- * @return No defined result yet; the implementation is pending. The intended
- *         result is a validated packet, or std::nullopt for invalid input.
- *
- * @warning The current definition is an empty non-void stub. Do not call it
- *          until it has been implemented.
+ * @return A validated packet, or std::nullopt for invalid input.
+ * @note This checks the wire format and position ranges, not packet ordering
+ *       or whether the application should submit a motor target.
  */
 std::optional<PositionPacket> decodePositionPacket(
     const std::uint8_t *data,

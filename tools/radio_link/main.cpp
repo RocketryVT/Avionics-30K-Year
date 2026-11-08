@@ -114,6 +114,7 @@ void reportTransmit(const RadioTransmitResult &result)
 
 void runTransmitter(SentenceCollector collector)
 {
+    // Hold the initial pose until the operator starts the simulation clock.
     enum class ReplayPhase { Hold, Running, Finished };
 
     ReplayPhase replay_phase = ReplayPhase::Hold;
@@ -141,6 +142,7 @@ void runTransmitter(SentenceCollector collector)
     {
         if constexpr (RADIO_POSITION_SOURCE == RadioPositionSource::Replay)
         {
+            // Limit console work so every iteration still services the radio.
             for (unsigned i = 0; i < 32; ++i)
             {
                 const int ch = getchar_timeout_us(0);
@@ -188,6 +190,7 @@ void runTransmitter(SentenceCollector collector)
             newFixAvailable = true;
         }
 
+        // Service the in-flight send while GPS/console work continues each loop.
         const auto tx_result = checkTransmit(tx);
         reportTransmit(tx_result);
         if (replay_phase == ReplayPhase::Hold &&
@@ -197,6 +200,7 @@ void runTransmitter(SentenceCollector collector)
         if (tx.faulted)
             return;
 
+        // Keep sends separate and leave at least 200 ms between their starts.
         if (!tx.busy && time_reached(nextTransmit))
         {
             if constexpr (RADIO_POSITION_SOURCE == RadioPositionSource::Replay)
@@ -204,6 +208,7 @@ void runTransmitter(SentenceCollector collector)
                 if (replay_phase == ReplayPhase::Finished)
                     continue;
 
+                // Sample when ready to send; hold mode always samples t=0.
                 const auto sampled_at = get_absolute_time();
                 const double elapsed_seconds =
                     replay_phase == ReplayPhase::Hold ? 0.0 :
@@ -296,6 +301,7 @@ int main()
 {
     initializeConsole();
 
+    // Initialize the radio once; the application loops service it afterward.
 #ifdef RADIO_LINK_TRANSMITTER
     const int radioState = initializeRadio(RadioMode::Transmitter);
 #else
@@ -310,6 +316,7 @@ int main()
     {
         std::printf("[RF69] ready\n");
 #ifdef RADIO_LINK_TRANSMITTER
+        // Replay uses the compiled table; only live GPS needs the UART.
         if constexpr (RADIO_POSITION_SOURCE == RadioPositionSource::Gps)
             initializeGps();
         SentenceCollector collector;

@@ -3,16 +3,26 @@
 #include <optional>
 #include "gps_position.hpp"
 
+/** @brief Selects live GPS or the existing simulated trajectory as the radio source. */
 enum class RadioPositionSource
 {
     Gps,
     Replay
 };
 
-// Build and flash both boards after changing this selection.
+/**
+ * @brief Selects the transmitter source and matching ground-station reference.
+ * @note This is a compile-time choice. Rebuild and flash both boards together.
+ */
 inline constexpr RadioPositionSource RADIO_POSITION_SOURCE =
     RadioPositionSource::Replay;
 
-// Set this to the verified station position before selecting live GPS.
+/**
+ * @brief Defines the ground-station reference used only in live GPS mode.
+ *
+ * @note Latitude/longitude are decimal degrees; altitude is WGS84 ellipsoidal
+ *       meters. std::nullopt refuses radio arming in GPS mode. Replay uses
+ *       REPLAY_STATION from replay_config.hpp instead.
+ */
 inline constexpr std::optional<GPSPosition> RADIO_LIVE_STATION =
     std::nullopt;

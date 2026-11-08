@@ -117,6 +117,7 @@ static constexpr std::optional<GPSPosition> RADIO_STATION =
     RADIO_POSITION_SOURCE == RadioPositionSource::Replay
         ? REPLAY_STATION : RADIO_LIVE_STATION;
 
+// Radio ownership is separate from arming and the local replay state.
 static bool g_radio_targets = false;
 static bool g_radio_have_order = false;
 static uint32_t g_radio_last_sequence = 0;
@@ -499,6 +500,7 @@ static bool radioStationReady()
            std::isfinite(s.altitude);
 }
 
+// Compare transmitter counters only; the two Pico clocks are not synchronized.
 static bool acceptRadioOrder(const PositionPacket &packet)
 {
     if (g_radio_have_order)
@@ -560,6 +562,7 @@ static void handle(const Command &c)
     }
     apply(d);
 
+    // Explicit TRACK modes choose the owner; a status query leaves it unchanged.
     if (c.err == ParseError::None && c.verb == Verb::Track && c.has_track)
     {
         if (!c.track_on)
@@ -615,6 +618,7 @@ static void poll_input()
     }
 }
 
+// Route radio and local replay through the same motor command rules.
 static bool submitRocketPosition(const GPSPosition &rocket,
                                  const GPSPosition &station,
                                  uint16_t commandId)
@@ -642,6 +646,7 @@ static void pollRadioTarget(absolute_time_t now)
     const auto received = *g_radio_pending;
     g_radio_pending.reset(); // Each received position is consumed once.
 
+    // This measures receiver queue time, not the original GPS fix's age.
     const int64_t wait_us =
         absolute_time_diff_us(received.received_at, now);
 
@@ -841,6 +846,7 @@ int main()
                 static_cast<unsigned long>(TRACK_TIMEOUT_MS))));
         }
 
+        // Apply last iteration's radio position only after the watchdog check.
         pollRadioTarget(get_absolute_time());
         pollReplay(now);
 
