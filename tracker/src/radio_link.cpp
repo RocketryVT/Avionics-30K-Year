@@ -7,6 +7,8 @@
 
 namespace
 {
+    spi_inst_t *const radioSpi = spi_get_instance(RADIO_SPI_BUS);
+
     class RadioPicoHal : public PicoHal
     {
     public:
@@ -18,7 +20,7 @@ namespace
             if (pin == RADIO_CS_PIN && value == GpioLevelHigh)
             {
                 // Finish clocking before releasing chip select.
-                while (spi_is_busy(spi0))
+                while (spi_is_busy(radioSpi))
                     tight_loop_contents();
 
                 sleep_us(2);
@@ -33,7 +35,7 @@ namespace
     };
 
     // Constructor order: SPI bus, MISO, MOSI, SCK.
-    RadioPicoHal hal(spi0, RADIO_MISO_PIN, RADIO_MOSI_PIN, RADIO_SCK_PIN);
+    RadioPicoHal hal(radioSpi, RADIO_MISO_PIN, RADIO_MOSI_PIN, RADIO_SCK_PIN);
 
     // Constructor order: hardware layer, CS, DIO0, RESET.
     Module module(&hal, RADIO_CS_PIN, RADIO_DIO0_PIN, RADIO_RESET_PIN);
@@ -43,6 +45,16 @@ namespace
 
 int initializeRadio(RadioMode mode)
 {
+    if constexpr (RADIO_ENABLE_PIN.has_value())
+    {
+        // Enable radio power before attempting SPI initialization.
+        const unsigned enablePin = *RADIO_ENABLE_PIN;
+        gpio_init(enablePin);
+        gpio_put(enablePin, 1);
+        gpio_set_dir(enablePin, GPIO_OUT);
+        sleep_ms(RADIO_ENABLE_SETTLE_MS);
+    }
+
     ConfigFSK_t config;
     config.frequency = RADIO_FREQUENCY_MHZ;
 
