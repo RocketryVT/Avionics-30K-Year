@@ -169,12 +169,12 @@ between a mistyped command and a hard stop.
 ### Tracking
 
 Modes 1 and 2 above move the antenna by a command at a time. Tracking is the
-third way: the laptop keeps saying *point here*, and the Pico keeps closing
+third way: a target source keeps saying *point here*, and the Pico keeps closing
 the gap on its own.
 
 | | |
 | --- | --- |
-| `track on` | Arm it. Needs both axes idle and zeroed |
+| `track on` | Select radio targets and arm. Needs both axes idle and zeroed, plus a configured station |
 | `track off` | Disarm, ramping to a stop. Never refused |
 | `TARGET` | Where to point, absolute, both axes. Sent by the tracking program, not typed |
 
@@ -231,11 +231,19 @@ leaves the current tracking session running.
 
 #### Sending the targets
 
-Something has to supply directions. In the window that is mode 3; from a
+The current combined firmware receives positions from a Pico 2 W transmitter,
+calculates pointing, and submits motor targets internally. `TRACK,<id>,ON`
+selects that radio source; `TRACK,<id>,REPLAY` selects the Pico's built-in local
+flight. See the [tracker guide](../tracker/README.md) for both firmware images,
+GPS/replay selection, radio replay controls, and the transmitter-restart procedure.
+
+Laptop target tools remain available. In the window that is mode 3; from a
 terminal it is `py -m gs.track`, which arms tracking itself, sends the
 targets, and disarms when it finishes. Close the `motor>` prompt first - only
-one program can have the port open. (`track on` at the prompt only arms it,
-which is mostly useful for seeing the 1.5 second give-up happen.)
+one program can have the port open. A USB `TARGET` takes ownership from radio
+and local replay; an explicit `TRACK ON` selects radio again. Keep the radio
+transmitter off for laptop-only motor tests. Radio arming still requires the
+station selected in `radio_tracking_config.hpp` to be configured.
 
 The Pico can also supply its own. In the window, pick mode 3, choose
 **the Pico's built-in flight**, and press **ARM tracking**. That arms

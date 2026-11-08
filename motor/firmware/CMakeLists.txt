@@ -90,6 +90,34 @@ add_subdirectory(
 
 target_link_libraries(gs_motor PRIVATE motor_interface)
 
+# RF69 support, using the same RadioLib release as the standalone build.
+include(FetchContent)
+
+FetchContent_Declare(radiolib
+    GIT_REPOSITORY https://github.com/jgromes/RadioLib.git
+    GIT_TAG 7.8.1
+    GIT_SHALLOW TRUE
+)
+
+FetchContent_MakeAvailable(radiolib)
+
+target_sources(gs_motor PRIVATE
+    "${CMAKE_CURRENT_SOURCE_DIR}/../../tracker/src/radio_link.cpp"
+    "${radiolib_SOURCE_DIR}/src/hal/RPiPico/PicoHal.cpp"
+)
+
+target_compile_definitions(gs_motor PRIVATE RADIOLIB_BUILD_RPI_PICO)
+
+target_link_libraries(gs_motor PRIVATE
+    RadioLib
+    position_packet
+    hardware_spi
+    hardware_gpio
+    hardware_timer
+    hardware_pwm
+    pico_multicore
+)
+
 # The simulated GPS flight for bench tests. It is always built in, and only
 # TRACK REPLAY plays it, so there is one firmware for the bench and the field.
 # It costs about 80 KB of the Pico 2 W's 4 MB of flash.
