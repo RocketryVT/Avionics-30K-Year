@@ -33,9 +33,6 @@ void initializeConsole()
 {
     stdio_init_all();
 
-    while (!stdio_usb_connected())
-        sleep_ms(10);
-
     std::printf("=== RFM69HCW initialization test ===\n");
 }
 
@@ -84,36 +81,41 @@ void reportTransmit(const RadioTransmitResult &result)
 {
     switch (result.status)
     {
-        case RadioTransmitStatus::Idle:
-        case RadioTransmitStatus::Started:
-            break;
-        case RadioTransmitStatus::EncodeRejected:
-            std::printf("TX encoding failed\n");
-            break;
-        case RadioTransmitStatus::StartFailed:
-            std::printf("TX seq=%lu start=%d cleanup=%d\n",
-                        static_cast<unsigned long>(result.sequence),
-                        result.radioState,
+    case RadioTransmitStatus::Idle:
+    case RadioTransmitStatus::Started:
+        break;
+    case RadioTransmitStatus::EncodeRejected:
+        std::printf("TX encoding failed\n");
+        break;
+    case RadioTransmitStatus::StartFailed:
+        std::printf("TX seq=%lu start=%d cleanup=%d\n",
+                    static_cast<unsigned long>(result.sequence),
+                    result.radioState,
+                    result.cleanupState);
+        break;
+    case RadioTransmitStatus::Sent:
+    case RadioTransmitStatus::TimedOut:
+        std::printf("TX seq=%lu start=0 sent=%d G0=%d IRQ2=0x%02X\n",
+                    static_cast<unsigned long>(result.sequence),
+                    result.status == RadioTransmitStatus::Sent ? 1 : 0,
+                    result.dio0 ? 1 : 0,
+                    static_cast<unsigned>(result.irq2));
+        if (result.cleanupState != 0)
+            std::printf("TX cleanup failed, code %d; transmission stopped\n",
                         result.cleanupState);
-            break;
-        case RadioTransmitStatus::Sent:
-        case RadioTransmitStatus::TimedOut:
-            std::printf("TX seq=%lu start=0 sent=%d G0=%d IRQ2=0x%02X\n",
-                        static_cast<unsigned long>(result.sequence),
-                        result.status == RadioTransmitStatus::Sent ? 1 : 0,
-                        result.dio0 ? 1 : 0,
-                        static_cast<unsigned>(result.irq2));
-            if (result.cleanupState != 0)
-                std::printf("TX cleanup failed, code %d; transmission stopped\n",
-                            result.cleanupState);
-            break;
+        break;
     }
 }
 
 void runTransmitter(SentenceCollector collector)
 {
     // Hold the initial pose until the operator starts the simulation clock.
-    enum class ReplayPhase { Hold, Running, Finished };
+    enum class ReplayPhase
+    {
+        Hold,
+        Running,
+        Finished
+    };
 
     ReplayPhase replay_phase = ReplayPhase::Hold;
     absolute_time_t replay_start{};
@@ -209,8 +211,7 @@ void runTransmitter(SentenceCollector collector)
                 // Sample when ready to send; hold mode always samples t=0.
                 const auto sampled_at = get_absolute_time();
                 const double elapsed_seconds =
-                    replay_phase == ReplayPhase::Hold ? 0.0 :
-                    absolute_time_diff_us(replay_start, sampled_at) / 1'000'000.0;
+                    replay_phase == ReplayPhase::Hold ? 0.0 : absolute_time_diff_us(replay_start, sampled_at) / 1'000'000.0;
 
                 const auto position = replayPositionAt(
                     elapsed_seconds, *REPLAY_GEOID_SEPARATION_M);
@@ -267,26 +268,26 @@ void runReceiver()
 
         switch (result.status)
         {
-            case RadioReceiveStatus::Idle:
-                break;
-            case RadioReceiveStatus::Packet:
-                std::printf("RX seq=%lu lat=%.7f lon=%.7f alt=%.2f m\n",
-                            static_cast<unsigned long>(result.packet->sequence),
-                            result.packet->position.latitude,
-                            result.packet->position.longitude,
-                            result.packet->position.altitude);
-                break;
-            case RadioReceiveStatus::ReadRejected:
-                std::printf("RX rejected: status=%d length=%lu\n",
-                            result.radioState,
-                            static_cast<unsigned long>(result.length));
-                break;
-            case RadioReceiveStatus::DecodeRejected:
-                std::printf("RX invalid position packet\n");
-                break;
-            case RadioReceiveStatus::Fault:
-                std::printf("RX restart failed, code %d\n", result.radioState);
-                return;
+        case RadioReceiveStatus::Idle:
+            break;
+        case RadioReceiveStatus::Packet:
+            std::printf("RX seq=%lu lat=%.7f lon=%.7f alt=%.2f m\n",
+                        static_cast<unsigned long>(result.packet->sequence),
+                        result.packet->position.latitude,
+                        result.packet->position.longitude,
+                        result.packet->position.altitude);
+            break;
+        case RadioReceiveStatus::ReadRejected:
+            std::printf("RX rejected: status=%d length=%lu\n",
+                        result.radioState,
+                        static_cast<unsigned long>(result.length));
+            break;
+        case RadioReceiveStatus::DecodeRejected:
+            std::printf("RX invalid position packet\n");
+            break;
+        case RadioReceiveStatus::Fault:
+            std::printf("RX restart failed, code %d\n", result.radioState);
+            return;
         }
     }
 }
