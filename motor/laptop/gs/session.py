@@ -22,7 +22,8 @@ reply carries the id of the command that caused it.
 sends a TRK line a few times a second with an id of 0. Nobody asked for it,
 so it goes to `on_chatter` like the heartbeat does rather than being kept as
 somebody's answer - otherwise it would fill the spare-replies list and be
-mistaken for a reply to whatever came next.
+mistaken for a reply to whatever came next. The radio's once-a-second RX
+summary is handled the same way.
 
 **Noticing a Pico that restarted.** PING and the heartbeat both report how
 long the Pico has been up. If that goes backwards it rebooted, which means
@@ -198,10 +199,8 @@ class Session:
 
         # An unprompted TRK is chatter in the same sense MSTAT is: nobody
         # asked for it. Dropping it would throw away the only report that
-        # arrives while an axis is turning.
-        unasked = isinstance(record, (p.Mstat, p.Info)) or (
-            isinstance(record, p.Trk) and record.id == 0
-        )
+        # arrives while an axis is turning. The radio's RX summary likewise.
+        unasked = p.is_chatter(record)
         if unasked and self.on_chatter is not None:
             self.on_chatter(record)
         if self.on_record is not None:
@@ -279,9 +278,7 @@ class Session:
                 return record
             if _is_error_for(record, cmd_id):
                 raise Refused(record)
-            if not isinstance(record, (p.Mstat, p.Info)) and not (
-                isinstance(record, p.Trk) and record.id == 0
-            ):
+            if not p.is_chatter(record):
                 # A reply to something else - most likely the DONE of a move
                 # whose wait was given up. Kept rather than dropped, so
                 # whoever is waiting for it can still find it.

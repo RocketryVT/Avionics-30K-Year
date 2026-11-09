@@ -52,6 +52,7 @@ from dataclasses import dataclass, field, replace
 
 from gs import motor
 from gs import protocol as p
+from gs import radio
 from gs import session as sn
 from gs import targets as tg
 from gs import tracking
@@ -102,13 +103,24 @@ TRACK_READ_S = 0.02
 # is only a scan of the serial ports, so this costs nothing while unplugged.
 RECONNECT_S = 2.0
 
+# Arming for the radio starts with TRACK OFF (see _arm_radio), and a new
+# session cannot start until both axes are at rest. After the Pico's own
+# watchdog has stopped a session they are still braking, so arming is tried
+# again every REARM_RETRY_S until it goes through. The wait is generous
+# because acceleration is settable: braking from 181 deg/s at the lowest
+# allowed 10 deg/s/s takes 18 s.
+REARM_RETRY_S = 0.1
+REARM_WAIT_S = 20.0
+
 # What a State forgets when the connection goes. Everything here is a reading
 # from the Pico, and rule 1 is that the screen shows the machine: a position
 # left on screen with nothing plugged in would be a remembered one.
 _UNPLUGGED = dict(target="", version="", uptime_ms=0, moving=False,
                   rebooted=False, tracking=False, pico_replay=False,
+                  pico_steers=False, from_radio=False, radio_dropped=False,
                   source_name="", targets_sent=0, sample=None, pos=None,
-                  gear=None, cfg=None, lim=None, heartbeat_at=None)
+                  gear=None, cfg=None, lim=None, heartbeat_at=None,
+                  link=None)
 
 
 @dataclass(frozen=True)
@@ -143,11 +155,22 @@ class State:
     # is what the window shows instead.
     tracking: bool = False
     source_name: str = ""
-    # True when the source is the Pico's built-in flight, so no targets are
-    # sent from here and "0 targets sent" is not a fault.
+    # True when the Pico works out its own targets - the built-in flight or
+    # the radio - so none are sent from here and "0 targets sent" is not a
+    # fault. `pico_replay` and `from_radio` say which of the two.
+    pico_steers: bool = False
     pico_replay: bool = False
+    from_radio: bool = False
+    # True once the Pico has ended a radio session by itself - its watchdog,
+    # with no usable position for p.TRACK_TIMEOUT_S - until something else
+    # is done about it. It is what offers the one-click re-arm.
+    radio_dropped: bool = False
     targets_sent: int = 0
     sample: object | None = None  # a tracking.Sample
+
+    # The radio link, from the ground Pico's once-a-second RX line. None
+    # while unplugged; a status with no report yet once connected.
+    link: radio.LinkStatus | None = None
 
     pos: p.Pos | None = None
     gear: p.Gear | None = None
@@ -173,9 +196,13 @@ class State:
             return "the Pico restarted - re-zero before moving"
         if self.tracking and self.pico_replay:
             return "TRACKING - the Pico is flying its built-in flight"
+        if self.tracking and self.from_radio:
+            return "TRACKING - the Pico is following the radio"
         if self.tracking:
             where = f" from {self.source_name}" if self.source_name else ""
             return (f"TRACKING{where} - {self.targets_sent} targets sent")
+        if self.radio_dropped:
+            return "radio tracking STOPPED - re-arm when packets arrive"
         if self.moving:
             return "moving"
         if self.working:
@@ -312,6 +339,11 @@ class MotorWorker(threading.Thread):
         self._loop: tracking.TrackingLoop | None = None
         self._source: tg.TargetSource | None = None
 
+        # Turns the ground Pico's RX lines into rates and ages. Made afresh
+        # for each connection, because one Pico's link says nothing about
+        # the next.
+        self._link: radio.LinkWatch | None = None
+
         # The prompt's command handling, for lines typed in the window. Built
         # when the port opens, because it needs the session.
         self._console: _GuiConsole | None = None
@@ -389,15 +421,25 @@ class MotorWorker(threading.Thread):
         """Arm tracking and start sending targets.
 
         `kind` is "manual", "moving", "sim" (a flight worked out here and
-        sent as targets) or "replay" (the flight built into the Pico's
-        firmware, which sends nothing from here). The rates and span are only
-        used by "moving", which sets off from az_deg/el_deg. The source is
-        built here, on the worker's thread, because that is the only thread
-        allowed to touch it afterwards.
+        sent as targets), "replay" (the flight built into the Pico's
+        firmware) or "radio" (positions the ground Pico receives from the
+        rocket). The last two send nothing from here. The rates and span are
+        only used by "moving", which sets off from az_deg/el_deg. The source
+        is built here, on the worker's thread, because that is the only
+        thread allowed to touch it afterwards.
         """
         self._jobs.put(_Job("track_start", (kind, hz, az_deg, el_deg,
                                             az_rate_dps, el_rate_dps,
                                             span_deg)))
+
+    def rearm_radio(self) -> None:
+        """Start following the radio again after the Pico gave up on it.
+
+        The same job as arming with the radio source - which clears the
+        Pico's packet ordering and waits for the axes to stop braking - just
+        without the window asking first. See _arm_radio.
+        """
+        self.start_tracking("radio", tracking.DEFAULT_HZ)
 
     def stop_tracking(self) -> None:
         self._jobs.put(_Job("track_stop"))
@@ -451,8 +493,9 @@ class MotorWorker(threading.Thread):
                 EVENT_LINE, ("|", line))))
         self._console.results = self.results
 
+        self._link = radio.LinkWatch(self._clock())
         self._set_state(connected=True, port=port or "", error="",
-                        rebooted=False)
+                        rebooted=False, link=self._link.status)
 
         # Collect the banner before the first poll, the way motor.py does, so
         # what the Pico says about itself lands in the log in order.
@@ -464,6 +507,11 @@ class MotorWorker(threading.Thread):
     def _note_record(self, record: p.Reply) -> None:
         if self._loop is not None:
             self._loop.note(record)
+        if isinstance(record, p.Rx):
+            self._note_rx(record)
+            # Not logged: once a second it would bury everything else in the
+            # conversation pane, and the radio panel shows it instead.
+            return
         if isinstance(record, p.Mstat):
             # Tracked separately: a heartbeat is how the window knows the
             # Pico is alive while nothing is being asked of it.
@@ -473,12 +521,31 @@ class MotorWorker(threading.Thread):
             text = _record_text(record)
         self._emit(EVENT_LINE, ("<", text))
 
+    def _note_rx(self, rx: p.Rx) -> None:
+        """One RX line: update the link, and say so if the radio died."""
+        if self._link is None:
+            return
+        was = self._link.status.rx
+        status = self._link.note(rx, self._clock())
+        # Sent now rather than with the next poll, so the panel keeps moving
+        # during a long move, when nothing else is polled.
+        self._set_state(link=status)
+
+        # The one change worth a line in the log: reception was running and
+        # now is not. The firmware does not restart it by itself.
+        if was is not None and was.enabled and not rx.enabled:
+            self._emit(EVENT_NOTE,
+                       "the radio stopped: " + rx.error_message() +
+                       ". The Pico does not restart it - fix the cause and "
+                       "restart the Pico.")
+
     def _close(self) -> None:
         # A tracking loop cannot outlive its port. Left behind, it would
         # keep the run loop in its tracking branch, which never reconnects.
         self._loop = None
         self._source = None
         self._console = None
+        self._link = None
         if self._session is not None:
             try:
                 self._session.close()
@@ -732,30 +799,95 @@ class MotorWorker(threading.Thread):
             source = tg.SimSource.rocket(hz=hz)
         elif kind == "replay":
             source = tg.PicoReplaySource()
+        elif kind == "radio":
+            source = tg.RadioSource()
         else:
             self._emit(EVENT_NOTE, f"no source called {kind!r}")
             return
 
+        from_radio = isinstance(source, tg.RadioSource)
         loop = tracking.TrackingLoop(session, source, hz=hz,
                                      clock=self._clock)
-        # Arming can be refused - an axis not zeroed - and _handle_job turns
-        # that into a note. Only keep the loop if it went through.
-        loop.arm()
+        # Arming can be refused - an axis not zeroed, no station position
+        # for the radio - and _handle_job turns that into a note. Only keep
+        # the loop if it went through.
+        if from_radio:
+            if self._arm_radio(session, loop) is None:
+                self._emit(EVENT_NOTE, "radio tracking was not armed")
+                return
+        else:
+            loop.arm()
         self._source = source
         self._loop = loop
         self._set_state(tracking=True, source_name=source.name,
+                        pico_steers=source.pico_steers,
                         pico_replay=source.pico_replay,
+                        from_radio=from_radio, radio_dropped=False,
                         targets_sent=0, sample=None)
         if source.pico_replay:
             self._emit(EVENT_NOTE,
                        "tracking armed - the Pico is flying its built-in "
                        "flight, nothing is sent from here")
+        elif from_radio:
+            self._emit(EVENT_NOTE,
+                       "tracking armed - the Pico is following the rocket "
+                       "over the radio, nothing is sent from here")
+            link = self._state.link
+            if link is None or not link.hearing(self._clock()):
+                # Said now, because the Pico's watchdog counts from the
+                # moment of arming: no usable position within
+                # p.TRACK_TIMEOUT_S and it stops again.
+                self._emit(EVENT_NOTE,
+                           "no radio packets are arriving yet - unless one "
+                           f"does within {p.TRACK_TIMEOUT_S} s the Pico "
+                           "stops tracking")
         else:
             self._emit(EVENT_NOTE,
                        f"tracking armed from {source.name} at {hz:g} Hz")
 
+    def _arm_radio(self, session, loop) -> p.Trk | None:
+        """Arm for the radio, starting a fresh packet-ordering session.
+
+        TRACK OFF goes first. On the Pico it is the only thing that clears
+        the radio's packet ordering, and without that a transmitter that has
+        restarted since the last session - its sequence back at 0, which
+        looks like an old packet - would have every packet thrown away and
+        the antenna would never move. TRACK OFF is never refused, and with
+        nothing armed it changes nothing else.
+
+        Then TRACK ON, which the Pico refuses as busy until both axes are at
+        rest. Straight after its watchdog has stopped a session they are
+        still braking, so arming is tried again until it goes through. The
+        stops stay live throughout. Returns the TRK, or None if a stop or
+        the window closing cut it short.
+        """
+        session.track(False)
+        deadline = self._clock() + REARM_WAIT_S
+        said = False
+        while True:
+            try:
+                return loop.arm()
+            except sn.Refused as refused:
+                if refused.err.code != "busy" or self._clock() >= deadline:
+                    raise
+            if not said:
+                self._emit(EVENT_NOTE,
+                           "waiting for the axes to come to rest before "
+                           "arming")
+                said = True
+            if self._apply_urgent():
+                return None
+            if self._stopping.wait(REARM_RETRY_S):
+                return None
+
     def _stop_tracking(self, why: str | None) -> None:
-        """Disarm and let the loop go. Safe when there is nothing running."""
+        """Disarm and let the loop go. Safe when there is nothing running.
+
+        Also withdraws the offer to re-arm the radio: whatever called this -
+        a stop, disarm, arming something else - is somebody taking over.
+        """
+        if self._state.radio_dropped:
+            self._set_state(radio_dropped=False)
         if self._loop is None:
             self._source = None
             return
@@ -800,16 +932,27 @@ class MotorWorker(threading.Thread):
         # showing what the machine is actually doing.
         if sample.trk is not None and not sample.trk.armed:
             # For the Pico's own flight this is the normal ending: it runs
-            # out of positions and its watchdog disarms.
-            replay = self._source is not None and self._source.pico_replay
+            # out of positions and its watchdog disarms. For the radio it is
+            # a dropout - or the transmitter not on yet - and the Pico does
+            # not re-arm by itself, so the window offers to.
+            source = self._source
+            replay = source is not None and source.pico_replay
+            from_radio = isinstance(source, tg.RadioSource)
             self._loop = None
             self._source = None
-            self._set_state(tracking=False, sample=sample)
-            self._emit(EVENT_NOTE,
-                       "the Pico stopped tracking - its built-in flight "
-                       "finished, or something stopped it" if replay else
-                       "the Pico stopped tracking - no targets reached it, "
-                       "or something stopped it")
+            self._set_state(tracking=False, sample=sample,
+                            radio_dropped=from_radio)
+            if replay:
+                why = ("its built-in flight finished, or something stopped "
+                       "it")
+            elif from_radio:
+                why = ("no usable radio position reached it for "
+                       f"{p.TRACK_TIMEOUT_S} s, or "
+                       "something stopped it. 're-arm radio' starts again "
+                       "once packets are arriving")
+            else:
+                why = "no targets reached it, or something stopped it"
+            self._emit(EVENT_NOTE, "the Pico stopped tracking - " + why)
             return
 
         self._set_state(sample=sample, targets_sent=loop.sent,

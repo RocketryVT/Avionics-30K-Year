@@ -42,7 +42,7 @@ Then run the two rebuild commands above. CMake fetches RadioLib **7.8.1** and SD
 -DPICOTOOL_FETCH_FROM_GIT_PATH="$PWD/build/radio-deps"
 ```
 
-Hold **BOOTSEL** while connecting each board over USB and copy its matching UF2 onto the mounted drive. The drive disappears when the Pico reboots. Open a separate USB serial monitor for each board. **Both applications currently wait for a USB connection before starting**; unattended field startup is not implemented.
+Hold **BOOTSEL** while connecting each board over USB and copy its matching UF2 onto the mounted drive. The drive disappears when the Pico reboots. Open a separate USB serial monitor for each board. **The ground image (`gs_motor`) waits for a USB connection before starting**; the transmitter starts on power alone.
 
 The old `build/radio-link` standalone receiver and `build/radio-link-pico-w` transmitter build folders have been removed. Reception now runs inside `gs_motor`; no separate receiver image is needed.
 
@@ -69,23 +69,11 @@ The complete path is transmitter replay → 22-byte RF69 packet → ground decod
 
 Start with motor power disconnected to check telemetry and loop timing. Before a powered test, confirm the current assembly, gearing, driver configuration, direction, and travel limits using the [motor guide](../motor/README.md).
 
-1. Select `Replay`, build and flash both images, and open both serial monitors with **LF or CRLF** line endings. On the transmitter, wait for `Replay holding at t=0. START runs; STOP ends.` It repeatedly transmits the initial position while simulation time remains zero.
-2. On the ground console, inspect the active configuration:
+1. Select `Replay`, build and flash both images. Open a serial monitor on the **transmitter** with **LF or CRLF** line endings and wait for `Replay holding at t=0. START runs; STOP ends.` It repeatedly transmits the initial position while simulation time remains zero.
+2. On the ground side, run `py -m gs.gui` from `motor/laptop`. The **radio** line under the connection should turn green and say `receiving`, with packets heard at about 5 per second. Zero both axes; the window keeps the Pico geared by itself. `ZERO` declares a known pose; it does not home or move an axis. Only zero at 0 if the current pose really is azimuth zero (true north) and elevation zero (level).
+3. In the **track** panel, choose **the rocket (radio)**, then press **ARM tracking**. The window resets packet ordering (`TRACK OFF`) before it arms (`TRACK ON`). The held initial position now feeds pointing and motor targets, and the note beside the buttons shows how many per second are steering. In a powered test, preposition and let the mechanism settle before advancing the flight. In a Pico-only test, reported positions are pulse counts rather than physical motion.
 
-   ```text
-   SETTINGS,1
-   LIMITS,2
-   GEAR,3
-   ```
-
-   Set the appropriate gear mode before declaring either axis's position. `ZERO` declares a known pose; it does not home or move an axis. Only if the current pose is correctly represented by azimuth zero and elevation zero should you use `ZERO,4,ALL,0`. Both axes must be zeroed and idle before a new tracking session can arm.
-3. On the **ground** console, select radio targeting:
-
-   ```text
-   TRACK,5,ON
-   ```
-
-   The held initial position now feeds pointing and motor targets. In a powered test, preposition and let the mechanism settle before advancing the flight. In a Pico-only test, reported positions are pulse counts rather than physical motion.
+   From a ground serial monitor instead: `SETTINGS,1`, `LIMITS,2`, `GEAR,3`, set the gear mode, `ZERO,4,ALL,0` (only if the pose is really zero), `TRACK,5,OFF`, then `TRACK,6,ON`.
 4. On the **transmitter** console, send:
 
    ```text
@@ -93,11 +81,11 @@ Start with motor power disconnected to check telemetry and loop timing. Before a
    ```
 
    `START` is uppercase and requires a completed held-position transmission. If it says `Waiting for first held transmission`, wait and send `START` again. This is a local transmit-completion check, not confirmation that the ground antenna has settled.
-5. The transmitter interpolates the existing flight at the configured minimum start interval (200 ms by default). At the end of the roughly 156-second trajectory it prints `Replay finished; no new packets`. After 15 seconds without an accepted target, the ground watchdog disarms tracking and ramps the axes to rest. Reception returning does not re-arm tracking.
+5. The transmitter interpolates the existing flight at the configured minimum start interval (200 ms by default). At the end of the roughly 156-second trajectory it prints `Replay finished; no new packets`. After 15 seconds without an accepted target, the ground watchdog disarms tracking and ramps the axes to rest. Reception returning does not re-arm tracking. The window shows `STOPPED` and enables **re-arm radio**, which arms again in one click once packets are arriving.
 
 To stop early, send **`STOP` to the transmitter** to stop producing packets, or `TRACK,<id>,OFF`, `STOP,<id>`, or `ESTOP,<id>` to the ground console to stop motor tracking. Ground stop commands do not stop the transmitter's replay clock. The transmitter completes cleanup of any in-flight send.
 
-To repeat a completed/stopped radio replay, disarm the ground station and wait for rest, then reboot the transmitter. Once it is running in hold mode again, send `TRACK,<id>,OFF` on the ground to reset packet ordering, then explicitly re-arm with `TRACK,<id>,ON`. `START` does not restart a finished replay.
+To repeat a completed/stopped radio replay, disarm the ground station and wait for rest, then reboot the transmitter. Once it is running in hold mode again, press **ARM tracking** (or **re-arm radio**) in the window; both reset packet ordering first. From a serial monitor, send `TRACK,<id>,OFF` then `TRACK,<id>,ON`. `START` does not restart a finished replay.
 
 ### Target source ownership
 
@@ -111,6 +99,8 @@ To repeat a completed/stopped radio replay, disarm the ground station and wait f
 When local replay ends or tracking times out, ownership does not automatically switch to radio. Use `TRACK,<id>,ON` explicitly. STOP, ESTOP, zero checks, active settings, and travel-limit clamping remain in the motor controller.
 
 ### Read reception and timing
+
+The window's **radio** line shows this summary as rates and ages: packets heard per second, how long since the last good one, how many were rejected recently, and how many per second are steering. The fields below are the raw totals behind it.
 
 The ground console emits a best-effort summary once per second:
 
@@ -137,9 +127,9 @@ This section is the **ground Pico's built-in local replay**, which needs no tran
 
 ### From the window
 
-Run `py -m gs.gui` from `motor/laptop`, choose mode **3 track** and **the Pico's built-in flight**. Confirm gearing and both zero declarations before pressing **ARM tracking**. The target/actual readout fills in from the `TRK` stream. **disarm**, **STOP**, and **E-STOP** all end it early. When the flight ends, the window notes that the Pico stopped tracking.
+Run `py -m gs.gui` from `motor/laptop`, in the **track** panel choose **the Pico's built-in flight**. Confirm gearing and both zero declarations before pressing **ARM tracking**. The target/actual readout fills in from the `TRK` stream. **disarm**, **STOP**, and **E-STOP** all end it early. When the flight ends, the window notes that the Pico stopped tracking.
 
-Mode 3 runs in `GEARED` mode, so the angles count the final gear pairs. The numbers below were taken in `DIRECT` mode from a serial monitor, as described next.
+The window runs in `GEARED` mode, so the angles count the final gear pairs. The numbers below were taken in `DIRECT` mode from a serial monitor, as described next.
 
 ### From a serial monitor
 
@@ -277,11 +267,11 @@ The 500 ms check measures receiver-side pending time, not GPS fix age or radio l
 ## Quick troubleshooting
 
 - **`SDK location was not specified`**: configure with `-DPICO_SDK_PATH` pointing to the installed SDK.
-- **Serial commands get no response**: open the correct board's USB monitor and enable LF or CRLF. Both applications wait for USB at startup. Transmitter replay commands are uppercase `START` and `STOP`; ground commands include their numeric ID.
+- **Serial commands get no response**: open the correct board's USB monitor and enable LF or CRLF. The ground image waits for USB at startup; the transmitter does not. Transmitter replay commands are uppercase `START` and `STOP`; ground commands include their numeric ID.
 - **`RX,ON` but no movement or `tgt` stays unchanged**: reception can run while tracking is off. Check the `TRK` arm state, selected target owner, and station/pointing validity. `ok` counts positions, not motor targets or measured movement.
 - **Tracking stops after about 15 seconds**: the watchdog saw no accepted target. For radio replay use ground `TRACK ON` and the transmitting board; for local replay use ground `TRACK REPLAY`. Check reception, ordering, source ownership, and valid pointing geometry.
 - **`START` is ignored or refused**: send it to the transmitter with a newline. Wait for one successful held-position transmission. A finished/stopped replay requires a transmitter reboot; reset ground ordering with `TRACK OFF` afterward.
-- **Packets are rejected after a transmitter reboot**: disarm, wait for rest, and send `TRACK OFF` once the rebooted transmitter is running, then explicitly re-arm. Sequence/timestamp rollback is not an automatic session reset.
+- **Packets are rejected after a transmitter reboot**: in the window, press **ARM tracking** or **re-arm radio**, which send `TRACK OFF` first. From a serial monitor: disarm, wait for rest, and send `TRACK OFF` once the rebooted transmitter is running, then explicitly re-arm. Sequence/timestamp rollback is not an automatic session reset.
 - **`RX,OFF` with nonzero `e`**: radio initialization or receive restart failed. Check radio wiring and restart the board after fixing the cause; firmware does not repeatedly initialize the radio in the motion loop.
 - **`ERR,<id>,station,unset or invalid`**: live GPS mode needs a verified finite station position in `radio_config.hpp`. Do not use the synthetic replay station for deployment.
 - **`ERR,<id>,replay`**: `replay_config.hpp` is missing the station position or the geoid separation. Set both and rebuild.

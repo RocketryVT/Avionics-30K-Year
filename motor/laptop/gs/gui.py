@@ -17,49 +17,56 @@ pyserial is the only dependency, so a laptop at a test site needs one pip
 install and nothing more. This will look plain and it will work with no
 internet.
 
-The three modes
----------------
+Always geared, always ready to track
+------------------------------------
 
-The firmware knows nothing about "mode 2". It knows two separate things -
-which gearing it is counting, and whether it is tracking - and the modes here
-are those composed into the three ways this machine actually gets used:
+There are no modes to choose between. The firmware knows two separate
+things - which gearing it is counting, and whether it is tracking - and this
+window fixes the first: gear on, both motors through the belt, every angle
+at the antenna. That is how the assembled antenna is driven, and tracking
+needs it. A single motor on the bench with gear off is a job for the
+`motor>` prompt.
 
-    1 independent   gear off   each motor on its own, one axis at a time,
-                               angles at the gearbox output shaft
-    2 combined      gear on    both motors through the belt, both axes in
-                               one command, angles at the antenna
-    3 track         gear on    a target stream the firmware chases
+So it is one screen: the position with its zero and a manual move under it,
+then the tracking panel, then the settings.
 
-The move panels for modes 1 and 2 each have two buttons for one box: "turn
-by" reads the number as a change, the way the prompt's `move` does, and "go
-to" reads it as a destination. The subtraction for "go to" happens on the
-Pico, which is the only place that knows where the axis really is.
+The move row has two buttons for one set of boxes: "turn by" reads each
+angle as a change, the way the prompt's `move` does, and "go to" reads it as
+a destination. The subtraction for "go to" happens on the Pico, which is the
+only place that knows where the axis really is. A blank angle keeps that
+axis still. The Pico refuses a two-axis move outright if either half rounds
+to no steps, so the window sends only the axes that are to move.
 
-Mode 3 is the one where the motors move without anybody pressing anything,
-so arming it is a separate click from entering it.
+Tracking is where the motors move without anybody pressing anything, so
+arming it is its own click, with an "are you sure?".
 
-Choosing a mode changes the gearing, **which costs both axes their zero**,
-so it asks first. Modes 2 and 3 are both `gear on`, so moving between them
-costs nothing.
+Its sources come in two kinds. Three are worked out here and sent as
+targets. The other two are worked out on the Pico and nothing is sent: the
+flight built into its firmware, and the rocket itself - GPS positions the
+ground Pico receives over the radio and turns into pointing on its own.
+For that one the window shows the radio link on a line of the connection
+panel (from the Pico's once-a-second RX line, see `radio.py`), and when the
+Pico's watchdog drops a radio session it offers a one-click re-arm, because
+the Pico never re-arms by itself.
 
-The window opens in mode 2, because that is how the assembled antenna is
-driven; mode 1 is for a motor on the bench. What is on screen still has to
-agree with the Pico, though, so the first reading settles it - see
-`_settle_mode`: with nothing zeroed the gearing is switched to match, which
-is free because a gear change costs only the zeros and there are none yet;
-with the axes already zeroed the window gives way instead and shows
-whichever mode the Pico's gearing is.
+Keeping it geared is `_keep_geared`'s job. A gear change costs both axes
+their zero, because the drive train is physically different. So whenever
+the Pico reports gear off with nothing zeroed - it booted that way, or
+somebody typed `gear off` - the window switches it straight back on, which
+costs nothing. With the axes zeroed, gear off is left alone, because
+spending somebody's zero unasked would undo their work. It is said in red
+under the position instead, and ARM tracking offers the switch rather than
+arming.
 
 With no Pico plugged in
 -----------------------
 
-The window opens and stays usable without one: modes can be switched and
-the boxes filled in, so it can be set up first. Readings show as blank
-rather than remembered. Any button that needs the Pico says "not connected"
-instead of doing anything (see `_offline`). The worker keeps looking for the
-Pico every couple of seconds, so plugging it in is all it takes. When it
-connects, the mode chosen while unplugged is settled against it the same
-way as at startup.
+The window opens and stays usable without one: the boxes can be filled in
+and the tracking source chosen, so it can be set up first. Readings show as
+blank rather than remembered. Any button that needs the Pico says "not
+connected" instead of doing anything (see `_offline`). The worker keeps
+looking for the Pico every couple of seconds, so plugging it in is all it
+takes, and its gearing is checked as soon as it answers.
 
 Typing commands
 ---------------
@@ -78,6 +85,15 @@ what has been typed.
 `stop` and `estop` typed in the box go the way the buttons send them,
 jumping the job queue, because a stop waiting behind the move it is meant to
 cut short would be no stop at all.
+
+The startup guide
+-----------------
+
+The "startup guide" button on the connection line opens the steps in
+`startup_guide.py` in a window of their own: from plugging in the Pico to
+arming on the rocket, with what this window should show after each one. It
+needs no Pico, so it is never disabled - it is most wanted before anything
+is connected.
 
 
 Four rules it holds to
@@ -112,7 +128,9 @@ from gs import command_help
 from gs import gui_worker as gw
 from gs import motor
 from gs import protocol as p
+from gs import radio
 from gs import results_file
+from gs import startup_guide
 
 # How often the Tk thread looks for events from the worker. Well under the
 # worker's own poll interval, so a fresh reading is shown as soon as it
@@ -135,33 +153,17 @@ TYPED_IGNORED = {"quit", "exit"}
 # How many typed lines the up arrow can walk back through.
 HISTORY = 50
 
-MODE_INDEPENDENT = 1
-MODE_COMBINED = 2
-MODE_TRACK = 3
+# Said beside the move buttons whenever no move is running.
+MOVE_HINT = "a blank angle keeps that axis still"
 
-# Which gearing each mode runs with. This is the whole mapping between the
-# modes on screen and the one fact the firmware holds.
-MODE_GEAR = {
-    MODE_INDEPENDENT: False,
-    MODE_COMBINED: True,
-    MODE_TRACK: True,
-}
+# The tracking sources the Pico steers itself, so the laptop sends no targets
+# and the targets/sec box does not apply.
+PICO_SOURCES = {"radio", "replay"}
 
-MODE_NOTE = {
-    MODE_INDEPENDENT: "each motor on its own - no 20:14 or 32:14 counted, "
-                      "angles at the gearbox output shaft",
-    MODE_COMBINED: "both motors through the belt - final pairs counted, "
-                   "angles at the antenna",
-    MODE_TRACK: "the Pico chases a target that keeps moving - pick a "
-                "source, then arm it",
-}
-
-# The mode the window opens in: the assembled antenna is driven through the
-# belt with both axes in one command, so that is what should be on screen
-# when the window appears. Mode 1 is for a motor on its own at the bench.
-# `_settle_mode` is what makes the Pico agree with this, or the window give
-# way to the Pico.
-MODE_DEFAULT = MODE_COMBINED
+# How long radio tracking runs before the window will say packets are not
+# steering. RX lines come once a second, so the first target to land needs
+# a couple of them to show up as a rate.
+RADIO_SETTLE_S = 3.0
 
 PAD = {"padx": 6, "pady": 3}
 
@@ -183,6 +185,18 @@ WARN = "#b45309"       # something is needed before anything will move
 BAD = "#c0271a"        # not connected, not zeroed, stopped short
 BUSY = "#1f6feb"       # something is happening right now
 TYPED_INK = "#7a4bbf"  # a line somebody typed, in the conversation pane
+QUOTE_BG = "#eef2f6"   # what the window should show, in the startup guide
+
+# How far the startup guide's text sits in from its step titles, in pixels.
+GUIDE_INDENT = 22
+
+# The radio panel's headline colour for each level radio.py reports.
+LINK_COLOUR = {
+    radio.LEVEL_NONE: MUTED,
+    radio.LEVEL_GOOD: GOOD,
+    radio.LEVEL_WARN: WARN,
+    radio.LEVEL_BAD: BAD,
+}
 
 
 def _uptime(ms: int) -> str:
@@ -219,6 +233,16 @@ class App:
         self._move_from: float | None = None
         self._move_est_s = 0.0
 
+        # The startup guide's window while it is open, so the button brings
+        # it forward rather than opening a second one.
+        self._guide: tk.Toplevel | None = None
+        self._guide_title_font: tkfont.Font | None = None
+
+        # True once gear on has been asked for, until the Pico reports it -
+        # so one gear-off reading sends one GEAR, not one per poll while the
+        # job waits its turn. See _keep_geared.
+        self._gear_sent = False
+
         root.title(WINDOW_TITLE)
         # The smallest it can be dragged to, not the size it opens at - that
         # is worked out from the layout at the end of this method.
@@ -246,23 +270,16 @@ class App:
 
         root.columnconfigure(0, weight=3)
         root.columnconfigure(1, weight=2)
-        root.rowconfigure(5, weight=1)
+        root.rowconfigure(4, weight=1)
 
         self._build_connection(0)
-        self._build_mode(1)
-        self._build_position(2)
+        self._build_position(1)
+        self._build_track(2)
         self._build_settings(3)
-        self._build_mode_panels(4)
-        self._build_log_and_commands(5)
-        self._build_stops(6)
-        self._build_status(7)
-
-        # Opens on MODE_DEFAULT. The first reading from the Pico settles
-        # whether that stands or the window follows the machine instead.
-        self.mode.set(MODE_DEFAULT)
-        self._show_mode_panel(MODE_DEFAULT)
-        self._applied_mode = MODE_DEFAULT
-        self._mode_settled = False
+        self._build_log_and_commands(4)
+        self._build_stops(5)
+        self._build_status(6)
+        self._show_source_rows()
 
         # Never bigger than the desktop. A window whose bottom edge is off
         # the screen is a window with the STOP buttons off the screen, and
@@ -375,30 +392,33 @@ class App:
         self.b_reconnect = ttk.Button(frame, text="reconnect",
                                       command=self._reconnect)
         self.b_reconnect.grid(row=0, column=4, sticky="e", **PAD)
+        # Needs no Pico, so `_refresh_enabled` leaves it alone: it is most
+        # wanted before anything is plugged in.
+        self.b_guide = ttk.Button(frame, text="startup guide",
+                                  command=self._open_guide)
+        self.b_guide.grid(row=0, column=5, sticky="e", **PAD)
         frame.columnconfigure(3, weight=1)
 
-    def _build_mode(self, row: int) -> None:
-        frame = self._frame(row, "mode")
-        self.mode = tk.IntVar(value=MODE_INDEPENDENT)
-        self.r_mode = {}
-        for col, (value, text) in enumerate((
-            (MODE_INDEPENDENT, "1  independent"),
-            (MODE_COMBINED, "2  combined"),
-            (MODE_TRACK, "3  track"),
-        )):
-            button = ttk.Radiobutton(frame, text=text, value=value,
-                                     variable=self.mode,
-                                     command=self._mode_chosen)
-            button.grid(row=0, column=col, sticky="w", **PAD)
-            self.r_mode[value] = button
-
-        self.v_gear = ttk.Label(frame, text="-", font=self.bold)
-        self.v_gear.grid(row=1, column=0, columnspan=3, sticky="w", **PAD)
-        # Prose, so it is not in the mono font the numbers use.
-        self.v_mode_note = ttk.Label(frame, text="", style="Hint.TLabel")
-        self.v_mode_note.grid(row=2, column=0, columnspan=3, sticky="w",
-                              **PAD)
-        self.v_steps = self._value(frame, 3, 0, columnspan=3)
+        # The link from the rocket, as the ground Pico hears it. Here with
+        # the connection rather than in the track panel, because whether
+        # packets are arriving is worth knowing before anybody arms anything.
+        # One line, not a panel of its own: the window is already as tall as
+        # a laptop screen, and every row added up here pushes the STOP
+        # buttons toward the bottom edge.
+        link = ttk.Frame(frame)
+        link.grid(row=1, column=0, columnspan=6, sticky="ew")
+        link.columnconfigure(2, weight=1)
+        ttk.Label(link, text="radio", font=self.bold).grid(
+            row=0, column=0, sticky="w", **PAD)
+        self.v_radio_head = ttk.Label(link, text="-", font=self.bold)
+        self.v_radio_head.grid(row=0, column=1, sticky="w", **PAD)
+        # width=1 asks for no width of its own, so the label takes whatever
+        # the row has left and a long line is cut off at the right - loop
+        # gap last, the number least needed - rather than widening the
+        # window, which would shuffle every panel below it.
+        self.v_radio_rates = ttk.Label(link, text="", font=self.mono,
+                                       width=1)
+        self.v_radio_rates.grid(row=0, column=2, sticky="ew", **PAD)
 
     def _build_position(self, row: int) -> None:
         frame = self._frame(row, "position")
@@ -450,6 +470,57 @@ class App:
             self.b_cal[axis] = button
         frame.columnconfigure(3, weight=1)
 
+        # Blank while the Pico is geared, which is always, unless it was
+        # zeroed with gear off before this window opened or somebody typed
+        # `gear off` after zeroing. Beside the calibrate row, which leaves
+        # this corner empty, so it costs no height. See _keep_geared.
+        self.v_gear = ttk.Label(frame, text="", font=self.bold,
+                                foreground=BAD)
+        self.v_gear.grid(row=2, column=0, columnspan=3, sticky="w", **PAD)
+
+        # A manual move, both axes in one command, each at its own speed.
+        # Here with the position and its zero rather than in a panel of its
+        # own: those three are what gets used together, and a panel costs a
+        # title and a border of height the window does not have.
+        move = ttk.Frame(frame)
+        move.grid(row=3, column=0, columnspan=4, sticky="w", pady=(6, 0))
+        self.e_speed: dict[str, ttk.Entry] = {}
+        self.e_angle: dict[str, ttk.Entry] = {}
+        col = 0
+        for axis, angle in (("az", "45"), ("el", "20")):
+            ttk.Label(move, text=axis, font=self.bold).grid(
+                row=0, column=col, padx=(6 if col == 0 else 14, 4))
+            ttk.Label(move, text="at").grid(row=0, column=col + 1)
+            self.e_speed[axis] = self._entry(move, 0, col + 2, "5",
+                                             width=6)
+            ttk.Label(move, text="deg/s,").grid(row=0, column=col + 3)
+            self.e_angle[axis] = self._entry(move, 0, col + 4, angle,
+                                             width=8)
+            ttk.Label(move, text="deg").grid(row=0, column=col + 5)
+            col += 6
+        # Two buttons, one set of boxes: "turn by" reads each angle as a
+        # change, "go to" as where to end up.
+        self.b_turn = ttk.Button(move, text="turn by", width=9,
+                                 style="Go.TButton",
+                                 command=lambda: self._move(False))
+        self.b_turn.grid(row=0, column=col, padx=(14, 2))
+        self.b_goto = ttk.Button(move, text="go to", width=9,
+                                 style="Go.TButton",
+                                 command=lambda: self._move(True))
+        self.b_goto.grid(row=0, column=col + 1, padx=2)
+
+        # How far through the move it is. Says how to use the boxes while
+        # nothing is moving, so that line earns its height either way.
+        progress = ttk.Frame(frame)
+        progress.grid(row=4, column=0, columnspan=4, sticky="ew")
+        progress.columnconfigure(0, weight=1)
+        self.progress = ttk.Progressbar(progress, mode="determinate",
+                                        maximum=1000)
+        self.progress.grid(row=0, column=0, sticky="ew", **PAD)
+        self.v_progress = ttk.Label(progress, text=MOVE_HINT,
+                                    style="Hint.TLabel")
+        self.v_progress.grid(row=0, column=1, sticky="e", **PAD)
+
     def _build_settings(self, row: int) -> None:
         frame = self._frame(row, "settings")
         for col, head in enumerate(
@@ -485,93 +556,39 @@ class App:
         self.b_defaults.grid(row=0, column=2, padx=2)
         frame.columnconfigure(5, weight=1)
 
-    def _build_mode_panels(self, row: int) -> None:
-        holder = self._frame(row, "move")
-        holder.columnconfigure(0, weight=1)
-        self.panels: dict[int, ttk.Frame] = {}
-
-        # --- mode 1: one axis at a time ---
-        one = ttk.Frame(holder)
-        self.panels[MODE_INDEPENDENT] = one
-        self.m1_axis = tk.StringVar(value="AZ")
-        for col, axis in enumerate(("AZ", "EL")):
-            ttk.Radiobutton(one, text=axis.lower(), value=axis,
-                            variable=self.m1_axis).grid(
-                row=0, column=col, sticky="w", **PAD)
-        ttk.Label(one, text="at").grid(row=0, column=2, padx=(10, 2))
-        self.m1_speed = self._entry(one, 0, 3, "5")
-        ttk.Label(one, text="deg/s,").grid(row=0, column=4, padx=2)
-        self.m1_angle = self._entry(one, 0, 5, "45")
-        ttk.Label(one, text="deg").grid(row=0, column=6, padx=2)
-        # Two buttons, one box. "turn by" is the bench move that has always
-        # been here; "go to" reads the same number as a destination.
-        self.b_move_one = ttk.Button(one, text="turn by", width=9,
-                                     style="Go.TButton",
-                                     command=self._move_one)
-        self.b_move_one.grid(row=0, column=7, padx=(12, 2))
-        self.b_goto_one = ttk.Button(one, text="go to", width=9,
-                                     style="Go.TButton",
-                                     command=lambda: self._move_one(True))
-        self.b_goto_one.grid(row=0, column=8, padx=2)
-        # The line this panel sends, so the command box and the window are
-        # not two things to learn.
-        ttk.Label(one, style="Hint.TLabel",
-                  text="typed:  move <az|el> <deg/s> <deg>"
-                       "   -   goto for a destination").grid(
-            row=1, column=0, columnspan=9, sticky="w", **PAD)
-
-        # --- mode 2: both axes, each at its own speed ---
-        both = ttk.Frame(holder)
-        self.panels[MODE_COMBINED] = both
-        self.m2_speed: dict[str, ttk.Entry] = {}
-        self.m2_angle: dict[str, ttk.Entry] = {}
-        for line, axis in ((0, "az"), (1, "el")):
-            ttk.Label(both, text=axis).grid(row=line, column=0, **PAD)
-            ttk.Label(both, text="at").grid(row=line, column=1)
-            self.m2_speed[axis] = self._entry(both, line, 2, "5")
-            ttk.Label(both, text="deg/s,").grid(row=line, column=3)
-            self.m2_angle[axis] = self._entry(both, line, 4,
-                                              "45" if axis == "az" else "20")
-            ttk.Label(both, text="deg").grid(row=line, column=5)
-        self.b_move_both = ttk.Button(both, text="turn by", width=9,
-                                      style="Go.TButton",
-                                      command=self._move_both)
-        self.b_move_both.grid(row=0, column=6, rowspan=2, padx=(12, 2))
-        self.b_goto_both = ttk.Button(both, text="go to", width=9,
-                                      style="Go.TButton",
-                                      command=lambda: self._move_both(True))
-        self.b_goto_both.grid(row=0, column=7, rowspan=2, padx=2)
-        ttk.Label(both, style="Hint.TLabel",
-                  text="typed:  move az <deg/s> <deg> el <deg/s> <deg>"
-                       "   -   one MOVE, both axes, either named first").grid(
-            row=2, column=0, columnspan=8, sticky="w", **PAD)
-
-        # --- mode 3: a target stream the Pico chases ---
-        track = ttk.Frame(holder)
-        self.panels[MODE_TRACK] = track
+    def _build_track(self, row: int) -> None:
+        """A target the Pico chases. Always on screen: this window is for
+        tracking, with the move row above for putting the antenna where it
+        needs to be first."""
+        track = self._frame(row, "track")
 
         picker = ttk.Frame(track)
         picker.grid(row=0, column=0, columnspan=4, sticky="w")
         self.m3_source = tk.StringVar(value="manual")
-        # The last one is the flight built into the Pico's firmware: the
-        # Pico feeds itself, so nothing is sent from here and the targets/sec
-        # box does not apply.
+        # The first three are worked out here and sent as targets, at the
+        # rate in the box. The last two are worked out on the Pico - the
+        # rocket's position arriving over the radio, or the flight built
+        # into its firmware - so nothing is sent from here and the rate box
+        # does not apply. One row, because the window is already as tall as
+        # a laptop screen.
         for col, (value, text) in enumerate((
             ("manual", "a direction I type"),
             ("moving", "a moving target"),
             ("sim", "a simulated flight"),
+            ("radio", "the rocket (radio)"),
             ("replay", "the Pico's built-in flight"),
         )):
             ttk.Radiobutton(picker, text=text, value=value,
                             variable=self.m3_source,
                             command=self._source_chosen).grid(
                 row=0, column=col, sticky="w", **PAD)
-        ttk.Label(picker, text="at").grid(row=0, column=4, padx=(12, 2))
-        self.m3_hz = self._entry(picker, 0, 5, "5", width=5)
-        ttk.Label(picker, text="targets/sec").grid(row=0, column=6, padx=2)
+        ttk.Label(picker, text="at").grid(row=0, column=5, padx=(12, 2))
+        self.m3_hz = self._entry(picker, 0, 6, "5", width=5)
+        ttk.Label(picker, text="targets/sec").grid(row=0, column=7, padx=2)
 
         aim = ttk.Frame(track)
         aim.grid(row=1, column=0, columnspan=4, sticky="w")
+        self.m3_aim_row = aim
         ttk.Label(aim, text="point at  az").grid(row=0, column=0, **PAD)
         self.m3_az = self._entry(aim, 0, 1, "0")
         ttk.Label(aim, text="el").grid(row=0, column=2, padx=2)
@@ -586,6 +603,7 @@ class App:
         # replacing one with the next without anybody typing them.
         moving = ttk.Frame(track)
         moving.grid(row=2, column=0, columnspan=4, sticky="w")
+        self.m3_moving_row = moving
         ttk.Label(moving, text="moving at  az").grid(row=0, column=0, **PAD)
         self.m3_az_rate = self._entry(moving, 0, 1, "3")
         ttk.Label(moving, text="el").grid(row=0, column=2, padx=2)
@@ -603,7 +621,13 @@ class App:
         self.b_disarm = ttk.Button(arm, text="disarm", width=10,
                                    command=self._disarm)
         self.b_disarm.grid(row=0, column=1, **PAD)
-        self.v_arm_note = self._value(arm, 0, 2, "")
+        # Only live once the Pico has given up on the radio by itself. One
+        # click, no "are you sure": the operator already said yes to radio
+        # tracking, and a dialog costs seconds the rocket does not wait for.
+        self.b_rearm = ttk.Button(arm, text="re-arm radio", width=13,
+                                  style="Arm.TButton", command=self._rearm)
+        self.b_rearm.grid(row=0, column=2, **PAD)
+        self.v_arm_note = self._value(arm, 0, 3, "")
 
         # The readout. Three numbers per axis, because the interesting thing
         # while tracking is not where it is but how far behind it is.
@@ -617,11 +641,6 @@ class App:
             self._value(board, line, 0, axis, font=self.bold)
             self.v_trk[axis] = [self._value(board, line, col)
                                 for col in (1, 2, 3, 4)]
-
-        self.progress = ttk.Progressbar(holder, mode="determinate",
-                                        maximum=1000)
-        self.progress.grid(row=1, column=0, sticky="ew", **PAD)
-        self.v_progress = self._value(holder, 2, 0, "")
 
     def _build_log_and_commands(self, row: int) -> None:
         log = ttk.LabelFrame(self.root, text="conversation")
@@ -764,6 +783,140 @@ class App:
         self.note("reconnecting...")
         self.worker.reconnect()
 
+    def _open_guide(self) -> None:
+        """The startup guide, in a window of its own beside this one.
+
+        One at a time: pressing the button again brings the open one to the
+        front. Not tied to this window, so it never sits on top of it - it
+        would cover the STOP buttons, and rule 3 says nothing does. Esc is
+        the ramped stop in it too, the same key in both windows.
+        """
+        if self._guide is not None and self._guide.winfo_exists():
+            self._guide.deiconify()
+            self._guide.lift()
+            self._guide.focus_set()
+            return
+
+        top = tk.Toplevel(self.root)
+        top.title(f"{WINDOW_TITLE} - {startup_guide.TITLE.lower()}")
+        top.configure(bg=CANVAS)
+        top.columnconfigure(0, weight=1)
+        top.rowconfigure(0, weight=1)
+
+        text = tk.Text(top, wrap="word", font="TkDefaultFont",
+                       background="white", foreground=INK, relief="flat",
+                       borderwidth=0, highlightthickness=0, padx=14,
+                       pady=10, cursor="arrow")
+        text.grid(row=0, column=0, sticky="nsew", padx=(6, 0), pady=(6, 0))
+        bar = ttk.Scrollbar(top, orient="vertical", command=text.yview)
+        bar.grid(row=0, column=1, sticky="ns", padx=(0, 6), pady=(6, 0))
+        text.configure(yscrollcommand=bar.set)
+        self._write_guide(text)
+        text.configure(state="disabled")
+
+        ttk.Button(top, text="close", command=self._close_guide).grid(
+            row=1, column=0, columnspan=2, sticky="e", padx=6, pady=6)
+
+        top.bind("<Escape>", lambda _event: self._stop())
+        top.protocol("WM_DELETE_WINDOW", self._close_guide)
+        self._place_guide(top)
+        self._guide = top
+
+    def _close_guide(self) -> None:
+        if self._guide is not None and self._guide.winfo_exists():
+            self._guide.destroy()
+        self._guide = None
+
+    def _place_guide(self, top: tk.Toplevel) -> None:
+        """Beside the main window, on whichever side has more room.
+
+        Narrower than its longest grey line if that is what it takes to
+        fit - a wrapped line is a small price next to a guide sitting over
+        E-STOP. Only a screen with no usable room either side gets it over
+        the main window, at the right edge; a click on the main window
+        brings that back in front.
+        """
+        expected = [line for step in startup_guide.steps()
+                    for line in step.expect]
+        margin = GUIDE_INDENT + 80  # quote indent, padding, scrollbar
+        want = max(self.mono.measure(line) for line in expected) + margin
+        least = self.mono.measure("0" * 40) + margin
+
+        self.root.update_idletasks()
+        screen_w = self.root.winfo_screenwidth()
+        screen_h = self.root.winfo_screenheight()
+        left = self.root.winfo_rootx()
+        right = left + self.root.winfo_width()
+        # The 24s leave room for the window frames Tk does not count.
+        room_right = screen_w - right - 24
+        room_left = left - 24
+
+        if room_right >= room_left and room_right >= least:
+            width = min(want, room_right)
+            x = right + 12
+        elif room_left >= least:
+            width = min(want, room_left)
+            x = left - width - 24
+        else:
+            width = min(want, screen_w - 40)
+            x = max(0, screen_w - width - 12)
+
+        y = max(0, self.root.winfo_rooty())
+        height = max(320, min(self.root.winfo_height(), screen_h - y - 80))
+        top.geometry(f"{width}x{height}+{x}+{y}")
+
+    def _write_guide(self, text: tk.Text) -> None:
+        if self._guide_title_font is None:
+            self._guide_title_font = self.heading.copy()
+            size = self._guide_title_font.cget("size")
+            self._guide_title_font.configure(
+                size=size + (3 if size > 0 else -3))
+        quote_in = GUIDE_INDENT + 10
+        text.tag_configure("title", font=self._guide_title_font, spacing3=4)
+        text.tag_configure("intro", foreground=MUTED, spacing3=6)
+        text.tag_configure("part", font=self.heading, foreground=BUSY,
+                           spacing1=14, spacing3=2)
+        text.tag_configure("step", font=self.bold, spacing1=10, spacing3=2)
+        text.tag_configure("body", lmargin1=GUIDE_INDENT,
+                           lmargin2=GUIDE_INDENT, spacing3=2)
+        text.tag_configure("after", spacing1=4)
+        text.tag_configure("label", foreground=MUTED, lmargin1=GUIDE_INDENT,
+                           lmargin2=GUIDE_INDENT, spacing1=4, spacing3=2)
+        # The newline is tagged too, so the grey runs to the right edge and
+        # the lines read as one box. A line too long for the window wraps
+        # with its second half indented, so it does not read as two lines
+        # of output.
+        wrapped = quote_in + 18
+        text.tag_configure("quote", font=self.mono, background=QUOTE_BG,
+                           lmargin1=quote_in, lmargin2=wrapped, rmargin=8)
+        text.tag_configure("seen", font=self.mono, foreground=WARN,
+                           lmargin1=quote_in, lmargin2=wrapped, spacing1=4)
+        text.tag_configure("fix", lmargin1=quote_in + 14,
+                           lmargin2=quote_in + 14)
+
+        text.insert("end", startup_guide.TITLE + "\n", "title")
+        text.insert("end", startup_guide.INTRO + "\n", "intro")
+        number = 0
+        for part in startup_guide.PARTS:
+            text.insert("end", part.title + "\n", "part")
+            if part.intro:
+                text.insert("end", part.intro + "\n", "body")
+            for step in part.steps:
+                number += 1
+                text.insert("end", f"{number}.  {step.title}\n", "step")
+                if step.do:
+                    text.insert("end", step.do + "\n", "body")
+                text.insert("end", f"Look at {step.look}:\n", "label")
+                for line in step.expect:
+                    text.insert("end", line + "\n", "quote")
+                if step.note:
+                    text.insert("end", step.note + "\n", ("body", "after"))
+                if step.otherwise:
+                    text.insert("end", "If you see this instead:\n", "label")
+                    for seen, fix in step.otherwise:
+                        text.insert("end", seen + "\n", "seen")
+                        text.insert("end", fix + "\n", "fix")
+
     def _stop(self) -> None:
         self.worker.stop()
 
@@ -773,8 +926,8 @@ class App:
     def _offline(self) -> bool:
         """True, having said so, when there is no Pico to send anything to.
 
-        Unplugged, the window stays usable - modes, panels, the boxes - so it
-        can be set up before the Pico arrives. Every button that needs the
+        Unplugged, the window stays usable - the boxes, the tracking source -
+        so it can be set up before the Pico arrives. Every button that needs the
         Pico checks here first, so pressing one says why nothing happened
         instead of queueing a job, or asking "are you sure?" about something
         that cannot happen.
@@ -812,44 +965,84 @@ class App:
         if not self._offline():
             self.worker.calibrate(axis)
 
-    def _move_one(self, absolute: bool = False) -> None:
+    def _move(self, absolute: bool) -> None:
+        """The move row: "turn by" when `absolute` is false, "go to" when
+        it is true.
+
+        Only the axes that are to move are sent. A blank angle keeps its
+        axis still, and so does 0 for "turn by" - the Pico refuses a
+        two-axis move whose half rounds to no steps, and would refuse the
+        whole thing rather than move the other axis alone.
+        """
         if self._offline():
             return
+        halves: dict[str, tuple[float, float]] = {}
         try:
-            speed = self._read(self.m1_speed, "speed")
-            angle = self._read(self.m1_angle, "angle")
+            for axis in ("az", "el"):
+                if not self.e_angle[axis].get().strip():
+                    continue
+                angle = self._read(self.e_angle[axis], f"{axis} angle")
+                if angle == 0 and not absolute:
+                    continue
+                speed = self._read(self.e_speed[axis], f"{axis} speed")
+                halves[axis] = (speed, angle)
         except motor.UsageError as exc:
             self.note(str(exc))
             return
-        self.worker.move(self.m1_axis.get(), speed, angle,
-                         absolute=absolute)
 
-    def _move_both(self, absolute: bool = False) -> None:
-        if self._offline():
+        if not halves:
+            self.note("nothing to move - give az or el an angle"
+                      + ("" if absolute else " other than 0"))
             return
-        try:
-            values = {
-                axis: (self._read(self.m2_speed[axis], f"{axis} speed"),
-                       self._read(self.m2_angle[axis], f"{axis} angle"))
-                for axis in ("az", "el")
-            }
-        except motor.UsageError as exc:
-            self.note(str(exc))
+        if len(halves) == 2:
+            self.worker.move_both(*halves["az"], *halves["el"],
+                                  absolute=absolute)
             return
-        self.worker.move_both(*values["az"], *values["el"],
-                              absolute=absolute)
+        (axis, (speed, angle)), = halves.items()
+        self.worker.move(axis.upper(), speed, angle, absolute=absolute)
 
-    # --- mode 3 ------------------------------------------------------------
+    # --- tracking ----------------------------------------------------------
 
     def _source_chosen(self) -> None:
         # Changing the source mid-flight would mean two of them fighting, so
         # it only takes effect next time tracking is armed.
         if self._state.tracking:
             self.note("the source changes next time you arm")
+        self._show_source_rows()
         self._refresh_enabled(self._state)
+
+    def _show_source_rows(self) -> None:
+        """Hide the direction rows when the Pico steers itself.
+
+        They do nothing for the radio or the built-in flight, and the window
+        is short of height - the rows they free are what pay for the radio
+        line up in the connection panel. Hidden rather than only disabled.
+        """
+        pico = self.m3_source.get() in PICO_SOURCES
+        for row in (self.m3_aim_row, self.m3_moving_row):
+            if pico:
+                row.grid_remove()
+            else:
+                row.grid()
 
     def _arm(self) -> None:
         if self._offline():
+            return
+        # Pointing is worked out at the antenna, which only gear on counts.
+        # _keep_geared fixes gear off by itself when it is free; this is the
+        # case where it was not, because the axes were zeroed.
+        gear = self._state.gear
+        if gear is not None and not gear.geared:
+            if self.confirm(
+                "Switch to gear on?",
+                "The Pico is counting gear off, so its angles are at the "
+                "gearbox shaft, not the antenna. Tracking needs gear on.\n\n"
+                "Switching costs BOTH axes their zero, because the drive "
+                "train is physically different. Zero again, then arm.",
+            ):
+                self.note("switching to gear on - zero both axes again, "
+                          "then arm")
+                self.worker.set_gear(True)
             return
         kind = self.m3_source.get()
         try:
@@ -879,6 +1072,28 @@ class App:
                 "2.5 minutes). Nothing is sent from the laptop.\n\n"
                 "STOP, E-STOP and disarm stay live. When the flight ends the "
                 "Pico stops tracking by itself.")
+        elif kind == "radio":
+            message = (
+                "The motors will start moving on their own, pointing at each "
+                "rocket position the Pico receives over the radio. Nothing "
+                "is sent from the laptop. The Pico points from the ground "
+                "station position built into its firmware "
+                "(radio_config.hpp).\n\n"
+                f"If no usable position arrives for {p.TRACK_TIMEOUT_S} s - "
+                f"including in the first {p.TRACK_TIMEOUT_S} s after arming "
+                "- the Pico stops tracking by itself, and 're-arm radio' "
+                "starts it again.\n\n"
+                "STOP, E-STOP and disarm stay live.")
+            # Not a refusal: the operator may know the transmitter is about
+            # to come on. But arming into silence is usually a mistake, so
+            # it is said where they have to read it.
+            link = self._state.link
+            now = self.clock()
+            if link is None or not link.hearing(now):
+                head = ("no radio reports" if link is None
+                        else link.headline(now)[0])
+                message = (f"WARNING - the radio link says: {head}.\n\n"
+                           + message)
         else:
             if kind == "manual":
                 following = "the direction you typed"
@@ -901,6 +1116,13 @@ class App:
     def _disarm(self) -> None:
         self.worker.stop_tracking()
 
+    def _rearm(self) -> None:
+        if self._offline():
+            return
+        self.note("re-arming radio tracking - waits for the axes to come to "
+                  "rest first")
+        self.worker.rearm_radio()
+
     def _point(self) -> None:
         if self._offline():
             return
@@ -915,7 +1137,9 @@ class App:
     def _show_tracking(self, st: gw.State) -> None:
         sample = st.sample
         if not st.tracking and sample is None:
-            self.v_arm_note.configure(text="not armed - nothing will move")
+            self.v_arm_note.configure(
+                text=self._dropped_note() if st.radio_dropped
+                else "not armed - nothing will move")
             for cells in self.v_trk.values():
                 for cell in cells:
                     cell.configure(text="-")
@@ -936,13 +1160,49 @@ class App:
                                          ("deg", "deg", "deg", "deg/s")):
                 cell.configure(text=f"{p.format_mdeg(value):>10} {unit}")
 
-        note = ("the Pico is flying its built-in flight" if st.pico_replay
-                else f"{st.targets_sent} targets sent")
+        if not st.tracking and st.radio_dropped:
+            # The last readings stay on the board, but the note says what
+            # happened rather than describing a session that has ended.
+            self.v_arm_note.configure(text=self._dropped_note())
+            return
+        if st.pico_replay:
+            note = "the Pico is flying its built-in flight"
+        elif st.from_radio:
+            note = self._radio_note(st)
+        else:
+            note = f"{st.targets_sent} targets sent"
         if getattr(sample, "clamped", False):
             # Said plainly, because the error will not close and the reason
             # is not the antenna's fault.
             note += "   OUT OF REACH - held at a travel limit"
         self.v_arm_note.configure(text=note)
+
+    @staticmethod
+    def _dropped_note() -> str:
+        # Short: a note longer than the panel's other rows widens the window.
+        return (f"STOPPED - radio quiet {p.TRACK_TIMEOUT_S} s. Re-arm when "
+                "packets arrive")
+
+    def _radio_note(self, st: gw.State) -> str:
+        """While following the radio: is it actually steering?
+
+        `ok` going up says packets are heard; `tgt` going up says they are
+        turning into motor targets. The gap between the two is the thing to
+        notice - packets that decode but give no pointing, from a station
+        position that is wrong or a rocket too close overhead.
+        """
+        link = st.link
+        now = self.clock()
+        if link is None or not link.hearing(now):
+            return "following the radio - NO PACKETS arriving"
+        # The rate looks back over several seconds, most of them from before
+        # arming, so give the first targets time to show before judging.
+        armed_for = getattr(st.sample, "t", 0.0)
+        if link.target_rate is None or armed_for < RADIO_SETTLE_S:
+            return "following the radio"
+        if not link.steering():
+            return "following the radio - packets but NO targets (station?)"
+        return f"following the radio - {link.target_rate:.1f} targets/s"
 
     def _apply_settings(self) -> None:
         """Send only what differs from what the Pico reports.
@@ -979,108 +1239,35 @@ class App:
         for axis, name, value in changes:
             self.worker.set_setting(axis, name, value)
 
-    # --- modes -------------------------------------------------------------
+    # --- gearing -----------------------------------------------------------
 
-    def _mode_chosen(self) -> None:
-        """A mode button was clicked. Change the gearing if it has to."""
-        wanted = self.mode.get()
-        gear_wanted = MODE_GEAR[wanted]
-        state = self._state
+    def _keep_geared(self, st: gw.State) -> None:
+        """Put the Pico back in gear on whenever that costs nothing.
 
-        # Unplugged: just show the mode. Its gearing is applied when the Pico
-        # connects, by _settle_mode, under the same rule as at startup - set
-        # while nothing is zeroed, never at the cost of a zero.
-        if not state.connected:
-            self._applied_mode = wanted
-            self._mode_settled = False
-            self._show_mode_panel(wanted)
-            self._refresh_enabled(state)
-            word = "on" if gear_wanted else "off"
-            self.note(f"mode {wanted} - gear {word} is set when the Pico "
-                      f"connects, unless it is already zeroed the other way")
-            return
+        This window always runs geared (see the module notes). Gear off
+        turns up when the Pico boots with it saved, or somebody types
+        `gear off`. A gear change costs both axes their zero, so:
 
-        # Already in the right gearing - or we have not been told yet, in
-        # which case asking the Pico is the only way to find out and the
-        # worker no-ops if it already matches.
-        known = state.gear is not None
-        if known and state.gear.geared == gear_wanted:
-            self._applied_mode = wanted
-            self._show_mode_panel(wanted)
-            self._refresh_enabled(state)
-            return
-
-        word = "on" if gear_wanted else "off"
-        if not self.confirm(
-            "Change the gearing?",
-            f"Mode {wanted} runs with gear {word}.\n\n"
-            "Changing the gearing costs BOTH axes their zero, because the "
-            "drive train is physically different. You will have to zero "
-            "again before anything will move.",
-        ):
-            # Put the button back where it was rather than leaving it
-            # showing a mode that was not entered.
-            self.mode.set(self._applied_mode)
-            return
-
-        self._applied_mode = wanted
-        self._show_mode_panel(wanted)
-        self.worker.set_gear(gear_wanted)
-
-    def _settle_mode(self, st: gw.State) -> None:
-        """Make the mode on screen and the Pico's gearing agree, once.
-
-        The window opens on MODE_DEFAULT, and a mode is a claim about the
-        gearing - while rule 1 says the screen shows the machine rather than
-        a wish. So the first reading that says what the Pico is counting
-        decides which of the two gives way:
-
-          - nothing is zeroed, so the gearing is free: ask for the gearing
-            the default mode wants. A gear change costs the zeros and there
-            are none to lose, which is why this one does not ask first.
-          - the axes ARE zeroed, so the Pico was being driven before this
-            window opened: follow it, and show the mode its gearing is.
-            Spending somebody's zero to honour a default they did not ask
-            for would be the window undoing their work.
-
-        Only the once, so that `gear off` typed later stands rather than
-        being argued with. What it leaves behind is a mode that no longer
-        matches the gearing, which `show` says out loud next to the gearing.
+          - nothing zeroed: switch now, without asking, because there is no
+            zero to lose. Not while a job or tracking is running - it waits
+            for the next quiet reading rather than cut in front of a move.
+          - zeroed: leave it. Spending somebody's zero unasked would undo
+            their work. `show` says GEAR OFF in red, and ARM tracking offers
+            the switch.
         """
-        if self._mode_settled or st.gear is None:
+        if not st.connected or st.gear is None or st.gear.geared:
+            self._gear_sent = False
             return
-        self._mode_settled = True
-
-        wanted = self.mode.get()
-        if st.gear.geared == MODE_GEAR[wanted]:
+        if (self._gear_sent or st.zeroed or st.working or st.moving
+                or st.tracking):
             return
-
-        if not st.zeroed:
-            word = "on" if MODE_GEAR[wanted] else "off"
-            # ZEROED is one flag for both axes, so "not zeroed" can still
-            # mean one axis was done. Said rather than guessed at.
-            self.note(f"mode {wanted}: switching to gear {word} while it is "
-                      f"free - nothing is zeroed. If you had just zeroed one "
-                      f"axis, that is gone too; zero again.")
-            self.worker.set_gear(MODE_GEAR[wanted])
-            return
-
-        follow = MODE_COMBINED if st.gear.geared else MODE_INDEPENDENT
-        self.mode.set(follow)
-        self._applied_mode = follow
-        self._show_mode_panel(follow)
-        self.note(f"the Pico is zeroed with gear "
-                  f"{'on' if st.gear.geared else 'off'}, so this is mode "
-                  f"{follow} - keeping that zero beats opening in mode "
-                  f"{MODE_DEFAULT}")
-
-    def _show_mode_panel(self, mode: int) -> None:
-        for value, panel in self.panels.items():
-            if value == mode:
-                panel.grid(row=0, column=0, sticky="ew")
-            else:
-                panel.grid_remove()
-        self.v_mode_note.configure(text=MODE_NOTE[mode])
+        self._gear_sent = True
+        # ZEROED is one flag for both axes, so "not zeroed" can still mean
+        # one axis was done. Said rather than guessed at.
+        self.note("the Pico is counting gear off - switching to gear on, "
+                  "which this window always runs. Nothing is zeroed, so it "
+                  "costs nothing; if you had zeroed one axis, zero it again.")
+        self.worker.set_gear(True)
 
     # --- events ------------------------------------------------------------
 
@@ -1102,9 +1289,11 @@ class App:
         except queue.Empty:
             pass  # everything the worker said has been shown
 
-        # These two tick on even when no event arrives, which is exactly when
-        # they matter: a Pico that stopped talking, and a move in progress.
+        # These tick on even when no event arrives, which is exactly when
+        # they matter: a Pico that stopped talking, a radio that went quiet,
+        # and a move in progress.
         self._show_heartbeat(self._state)
+        self._show_radio(self._state)
         self._show_progress()
         self.root.after(DRAIN_MS, self._drain)
 
@@ -1128,7 +1317,7 @@ class App:
     def _move_ended(self, outcomes, narrate: bool = True) -> None:
         self._move_from = None
         self.progress.configure(value=0)
-        self.v_progress.configure(text="")
+        self.v_progress.configure(text=MOVE_HINT, foreground=MUTED)
         if not narrate:
             return
         for outcome in outcomes:
@@ -1140,7 +1329,6 @@ class App:
                 f"(predicted {outcome.plan.est_s:.2f} s), now at "
                 f"{p.format_mdeg(done.to_mdeg)} deg"
             )
-        self.v_progress.configure(text="")
 
     def _show_progress(self) -> None:
         if self._move_from is None:
@@ -1152,7 +1340,8 @@ class App:
         # Said to be an estimate, because it is the Pico's prediction rather
         # than anything measured - and a move that is stopping runs over it.
         self.v_progress.configure(
-            text=f"{gone:4.1f} s of about {est:.1f} s predicted")
+            text=f"{gone:4.1f} s of about {est:.1f} s predicted",
+            foreground=INK)
 
     def append(self, direction: str, text: str) -> None:
         tag = {">": "out", "<": "in", "$": "typed",
@@ -1177,45 +1366,46 @@ class App:
         age = self.clock() - st.heartbeat_at
         self.v_heartbeat.configure(text=f"heartbeat {age:.0f}s ago")
 
+    def _show_radio(self, st: gw.State) -> None:
+        """The radio line. Ages are worked out against now, so they
+        keep counting between the Pico's once-a-second reports."""
+        link = st.link
+        if link is None:
+            self.v_radio_head.configure(text="-", foreground=MUTED)
+            self.v_radio_rates.configure(text="")
+            return
+        now = self.clock()
+        head, level = link.headline(now)
+        self.v_radio_head.configure(text=head, foreground=LINK_COLOUR[level])
+        self.v_radio_rates.configure(text=link.details(now))
+
     def show(self, st: gw.State) -> None:
         """Put a State on the screen, and keep it as the current one.
 
         Displayed values are never remembered across calls - what is on
         screen is what the Pico last said. The State itself is kept because
         the controls need it: `apply` compares against it to work out what
-        actually changed, and the mode buttons need to know the gearing.
+        actually changed, and arming needs to know the gearing.
         """
         self._state = st
-        # A Pico that comes back may be a different one, or the same one
-        # restarted, so the mode on screen is settled against it afresh.
-        if not st.connected:
-            self._mode_settled = False
-        self._settle_mode(st)
+        self._keep_geared(st)
         self._show_title(st)
         self.v_port.configure(text=st.port or "no port")
         self.v_who.configure(text=f"{st.target} {st.version}".strip() or "-")
         self.v_uptime.configure(text=f"up {_uptime(st.uptime_ms)}")
         self._show_heartbeat(st)
+        self._show_radio(st)
 
-        if st.gear is None:
-            self.v_gear.configure(text="gearing unknown", foreground=MUTED)
-            self.v_steps.configure(text="")
+        # Nothing to say while geared, which is the only way this window
+        # runs. Gear off changes what every angle on screen means, so it is
+        # said in red until it is fixed.
+        if st.gear is not None and not st.gear.geared:
+            self.v_gear.configure(
+                text="GEAR OFF - angles at the gearbox shaft, not the "
+                     "antenna" + ("  (ARM tracking offers gear on)"
+                                  if st.zeroed else ""))
         else:
-            on = st.gear.geared
-            text = ("GEAR ON - final pair counted" if on
-                    else "GEAR OFF - gearbox only")
-            # A mode is a claim about the gearing, and the two can come apart
-            # - `gear off` typed in the command box does not move the mode
-            # buttons. Said where the gearing is shown, because it changes
-            # what every angle in the window means.
-            agrees = on == MODE_GEAR[self.mode.get()]
-            if not agrees:
-                text += f"   - NOT the gearing mode {self.mode.get()} means"
-            self.v_gear.configure(text=text,
-                                  foreground=INK if agrees else BAD)
-            self.v_steps.configure(
-                text=f"az {st.gear.az_steps_per_deg:8.3f} steps/deg"
-                     f"    el {st.gear.el_steps_per_deg:8.3f} steps/deg")
+            self.v_gear.configure(text="")
 
         if st.pos is None:
             self.v_az.configure(text="-")
@@ -1282,8 +1472,7 @@ class App:
                 text="not saved - a restart would lose these")
         elif st.cfg.built_in:
             self.v_saved.configure(
-                text="the built-in numbers for this gear mode - "
-                     "a restart comes back here")
+                text="the built-in numbers - a restart comes back here")
         else:
             self.v_saved.configure(text="saved - a restart comes back here")
 
@@ -1334,21 +1523,22 @@ class App:
                        self.b_apply, self.b_save, self.b_defaults):
             widget.state(["!disabled"] if usable else ["disabled"])
 
-        for widget in (self.b_move_one, self.b_move_both,
-                       self.b_goto_one, self.b_goto_both,
-                       *self.b_cal.values()):
+        # `settled` is false while tracking, so a manual move cannot be
+        # thrown in while the Pico is chasing a target.
+        for widget in (self.b_turn, self.b_goto, *self.b_cal.values()):
             widget.state(["!disabled"] if movable else ["disabled"])
-
-        # No switching modes mid-flight: `settled` is false while tracking,
-        # which is what stops it.
-        for button in self.r_mode.values():
-            button.state(["!disabled"] if usable else ["disabled"])
 
         # Arming needs a zero and a settled machine; disarming must always be
         # available, like the stops.
         self.b_arm.state(["!disabled"] if movable and not st.tracking
                          else ["disabled"])
         self.b_disarm.state(["!disabled"] if st.tracking else ["disabled"])
+        # Live while the axes are still braking from the session that ended
+        # - pressing it then is the point - so `moving` does not close it.
+        # The worker waits for rest before it arms.
+        rearm = (st.connected and st.radio_dropped and not st.tracking
+                 and not st.working and st.zeroed and not st.rebooted)
+        self.b_rearm.state(["!disabled"] if rearm else ["disabled"])
         # The direction boxes stay editable whenever the source is manual,
         # armed or not: you type where to point and THEN arm. (A disabled
         # ttk.Entry refuses even a programmatic write, so getting this the
@@ -1361,9 +1551,9 @@ class App:
             widget.state(["!disabled"] if manual or moving else ["disabled"])
         for widget in (self.m3_az_rate, self.m3_el_rate, self.m3_span):
             widget.state(["!disabled"] if moving else ["disabled"])
-        # The Pico's built-in flight runs at its own rate, so there is no
-        # targets/sec to choose.
-        self.m3_hz.state(["disabled"] if self.m3_source.get() == "replay"
+        # The Pico's built-in flight and the radio run at their own rates,
+        # so there is no targets/sec to choose.
+        self.m3_hz.state(["disabled"] if self.m3_source.get() in PICO_SOURCES
                          else ["!disabled"])
         # Sending one, though, needs something armed to send it to.
         self.b_point.state(["!disabled"] if manual and st.tracking

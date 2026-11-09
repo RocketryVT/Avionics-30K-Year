@@ -234,7 +234,11 @@ class TrackingLoop:
             return None
         self._next_send = now + self.period
 
-        fix = self.source.latest(now)
+        # A source the Pico steers itself is never asked: a TARGET from here
+        # would take over from the radio or end the built-in flight. Its
+        # `latest` returns nothing anyway; this makes that a rule rather
+        # than a promise.
+        fix = None if self.source.pico_steers else self.source.latest(now)
         az = el = None
         if fix is not None:
             # The source's bearing, as the azimuth the Pico works in. The

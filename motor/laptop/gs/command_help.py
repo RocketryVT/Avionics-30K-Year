@@ -73,8 +73,8 @@ ENTRIES = [
         command="move",
         usage="move az <deg/s> <deg> el <deg/s> <deg>",
         what="Turns both axes at once, each at its own speed.",
-        when="Testing the two motors together once the belt is on - mode 2 "
-             "in the window.",
+        when="Putting the antenna somewhere by hand - the move row under "
+             "the position in the window.",
     ),
     Entry(
         command="goto",
@@ -116,15 +116,17 @@ ENTRIES = [
     Entry(
         command="track",
         usage="track [on|off|replay]",
-        what="Arms or disarms chasing a target. Arming moves nothing on its "
-             "own. 'replay' arms it and has the Pico fly the simulated "
-             "flight built into its firmware, with no targets sent from "
-             "here.",
-        when="Rarely by hand: the window's mode 3 and 'py -m gs.track' arm "
-             "it themselves. Useful for checking arming works, and for "
-             "watching the safety stop - with no targets arriving the Pico "
-             "gives up after about a second and a half, which is what a "
-             "radio dropout looks like.",
+        what="'on' arms tracking to follow the rocket over the radio: the "
+             "Pico points itself at each position it receives. 'off' "
+             "disarms, and also resets the radio's packet ordering. "
+             "'replay' has the Pico fly the simulated flight built into its "
+             "firmware. None of them sends targets from here.",
+        when="Rarely by hand: the window's track panel arms all of these, "
+             "shows "
+             "the radio link, and re-arms the radio in one click. With no "
+             "usable position for about a second and a half the Pico gives "
+             "up by itself. After the transmitter restarts, 'track off' "
+             "before 'track on', or its packets are thrown away as old.",
     ),
 
     # --- tuning ------------------------------------------------------------
@@ -237,7 +239,8 @@ ENTRIES = [
     Entry(
         command="verbose",
         usage="verbose [on|off]",
-        what="Shows or hides the heartbeat and the tracking stream.",
+        what="Shows or hides the heartbeat, the tracking stream and the "
+             "radio's once-a-second summary.",
         when="You want to see the Pico is alive, or watch tracking close in. "
              "Hidden by default because a few lines a second scrolls "
              "everything else away.",

@@ -47,8 +47,10 @@ py -m gs.motor  --- text commands -->  gs_motor  --- cw + ccw -->    CL57TE x2
 | `ports.py` | Finds the Pico's serial port |
 | `scripted_runs.py` | The `sweep` and `random` runs |
 | `results_file.py` | The CSV results file |
-| `targets.py` | Where a pointing direction comes from: typed, simulated, or live |
+| `targets.py` | Where a pointing direction comes from: typed, simulated, or the Pico itself (radio, built-in flight) |
+| `radio.py` | Turns the ground Pico's once-a-second `RX` line into packet rates and ages for the window |
 | `command_help.py` | What each command does, and when to reach for it |
+| `startup_guide.py` | The window's startup guide: each step from plugging in to arming on the rocket, and what the window should show |
 | `tracking.py` | The loop that keeps sending targets |
 | `track.py` | `py -m gs.track`: rehearse or run a flight |
 | `flight_log.py` | The time-series CSV a tracking run writes |
@@ -161,6 +163,8 @@ The mode is kept by `save` along with the other settings, so a restart comes
 back in it. A Pico with nothing saved comes up in direct mode. The mode is
 printed in the startup banner, by `gear`, and by `settings`.
 
+The window (`py -m gs.gui`) always runs `gear on`. It has no gear choice: when the Pico reports `gear off` with nothing zeroed, the window switches it back on by itself, which costs nothing. If the axes are zeroed it leaves them alone, shows `GEAR OFF` in red under the position, and **ARM tracking** offers the switch instead of arming. `gear off` is for the `motor>` prompt.
+
 Before the first geared move, check `motor_config.hpp`: nobody has counted
 azimuth's 32 teeth on this machine, and elevation's -25 to 180 travel has not
 been measured on the assembled antenna. Those two numbers are the only thing
@@ -168,7 +172,7 @@ between a mistyped command and a hard stop.
 
 ### Tracking
 
-Modes 1 and 2 above move the antenna by a command at a time. Tracking is the
+`move` and `goto` above move the antenna by a command at a time. Tracking is the
 third way: a target source keeps saying *point here*, and the Pico keeps closing
 the gap on its own.
 
@@ -237,7 +241,42 @@ selects that radio source; `TRACK,<id>,REPLAY` selects the Pico's built-in local
 flight. See the [tracker guide](../tracker/README.md) for both firmware images,
 GPS/replay selection, radio replay controls, and the transmitter-restart procedure.
 
-Laptop target tools remain available. In the window that is mode 3; from a
+##### Following the rocket from the window
+
+The **startup guide** button beside **reconnect** opens these steps in a
+window of their own, with what the window should show after each one. It
+works before a Pico is plugged in.
+
+1. `py -m gs.gui`. The **radio** line under the connection says whether
+   packets are arriving: `receiving` (green), `no packets ...` (amber),
+   `RADIO OFF - <why>` (red), or `no radio reports` if the firmware has no
+   receiver. Beside it: packets heard per second, how long since the last
+   good one, how many were thrown away (in the last 5 s, and in total),
+   how many per second are steering the antenna, the last sequence number,
+   and the worst motor-loop gap.
+2. Zero both axes. The window keeps the Pico geared by itself.
+3. In the **track** panel, choose **the rocket (radio)** and press **ARM tracking**.
+   The confirmation warns you if no packets are arriving. The window sends
+   `TRACK OFF` before `TRACK ON`, which resets the Pico's packet ordering, so
+   a transmitter that restarted since the last session is heard again. If
+   the axes are still braking from the last session, it waits for them to
+   stop before arming. Nothing is sent from the laptop after that.
+4. While it runs, the note beside the buttons says `following the radio -
+   N targets/s`. `packets but NO targets` means positions are arriving but
+   none turn into pointing, so check the station position. `NO PACKETS`
+   means the link has gone quiet.
+5. If no usable position arrives for 15 s (including the first 15 s
+   after arming), the Pico stops tracking by itself and never re-arms. The
+   window says `STOPPED` and lights **re-arm radio**: one click, no
+   confirmation, and the same arm sequence as step 3. STOP, E-STOP and
+   **disarm** withdraw the offer.
+
+If the Pico has no ground-station position for the radio, arming is refused
+with "the ground station's position is not set in radio_config.hpp". Set
+`RADIO_LIVE_STATION` and reflash. The `motor>` prompt hides the `RX` line
+unless `verbose on`.
+
+Laptop target tools remain available. In the window that is the **track** panel; from a
 terminal it is `py -m gs.track`, which arms tracking itself, sends the
 targets, and disarms when it finishes. Close the `motor>` prompt first - only
 one program can have the port open. A USB `TARGET` takes ownership from radio
@@ -245,7 +284,7 @@ and local replay; an explicit `TRACK ON` selects radio again. Keep the radio
 transmitter off for laptop-only motor tests. Radio arming still requires the
 station selected in `radio_config.hpp` to be configured.
 
-The Pico can also supply its own. In the window, pick mode 3, choose
+The Pico can also supply its own. In the window's **track** panel, choose
 **the Pico's built-in flight**, and press **ARM tracking**. That arms
 tracking and has the Pico fly the simulated flight built into its firmware,
 with nothing sent from the laptop. (`track replay` at the prompt and
@@ -272,14 +311,16 @@ anything is bolted up.
 radio and the geometry out of the picture, so what is left under test is the
 chase loop.
 
-The window's mode 3 also has **a moving target**: it sets off from the
+The window's **track** panel also has **a moving target**: it sets off from the
 direction typed, moves each axis at the rate given, and turns back every so
 many degrees. Every target it sends replaces the last, so it is the way to
 watch the chase follow something that never stops changing, without typing.
 
-Four sources, one interface, in `targets.py`. The fourth is `LiveSource`,
-which is where the lat/lon/alt-to-az/el module plugs in when it is ready —
-hand it a callable returning `(az_deg, el_deg, fix_time)` and it works. It
+The sources all share one interface, in `targets.py`. Two of them send
+nothing: `RadioSource` and `PicoReplaySource` arm the Pico and let it steer
+itself, and the loop never sends a `TARGET` for them, because one would take
+over from the radio. `LiveSource` is for anything that works out a direction
+on the laptop: hand it a callable returning `(az_deg, el_deg, fix_time)`. It
 wants **absolute** angles, not changes; `DeltaSource` is there if that cannot
 be arranged, and its docstring says why it is the worse option.
 

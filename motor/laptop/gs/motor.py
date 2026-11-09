@@ -52,7 +52,7 @@ PROMPT = "motor> "
 # number on the first move of a run and nowhere near it after that.
 READING_WARN_DEG = 5.0
 
-HELP_TEXT = """\
+HELP_TEXT = f"""\
   move <az|el> <deg/s> <degrees>   turn an axis, + or -
   move az <deg/s> <deg> el <deg/s> <deg>   both at once, each at its own speed
   goto <az|el> <deg/s> <degrees>   turn TO an angle, not by one
@@ -71,13 +71,13 @@ HELP_TEXT = """\
   save                             keep the settings after a restart
   defaults                         back to the numbers in motor_config.hpp
   gear [on|off]                    count the final gear pair, or not
-  track [on|off|replay]            arm or disarm chasing a target
+  track [on|off|replay]            follow the radio, stop, or fly the replay
   sweep [angle=45] [speeds=1,5,90] [pause]   one angle at each speed
   random [count=10] [speed=5] [seed=N] [pause]   angles within the limits
   true [row] <degrees>             what the protractor really reads
   note [row] <text>                write a note against a row
   rows [n]                         show the last n rows of the table
-  verbose [on|off]                 show the heartbeat
+  verbose [on|off]                 show the heartbeat, tracking and radio
   help                             this
   quit                             leave
 
@@ -86,11 +86,14 @@ HELP_TEXT = """\
   Ctrl-C during a move stops the motor, then waits for its report.
   'gear on' means the belt is fitted and angles are at the antenna;
   'gear off' means each axis on its own, angles at the gearbox shaft.
-  To track, close this prompt and run 'py -m gs.track' (or use the window):
-  it arms tracking and sends the targets. 'track on' here only arms it, and
-  with nothing sending targets the Pico gives up after a second or so.
-  'track replay' arms it and has the Pico fly the simulated flight built
-  into its firmware, on its own - a bench test. 'track off' or 'stop' ends it."""
+  Tracking is easiest from the window's track panel. Here, 'track on' arms
+  it to follow the rocket over the radio (firmware with the receiver built
+  in): the Pico points itself, and gives up if no usable position arrives
+  for {p.TRACK_TIMEOUT_S} s. After the transmitter restarts, 'track off'
+  first, then 'track on'.
+  'track replay' has the Pico fly the simulated flight built into its
+  firmware - a bench test. 'py -m gs.track' sends targets from the laptop
+  instead. 'track off' or 'stop' ends any of them."""
 
 
 class UsageError(Exception):
@@ -239,6 +242,19 @@ class Console:
                     f" of {p.format_mdeg(record.az_target_mdeg)}"
                     f"   el {p.format_mdeg(record.el_pos_mdeg)}"
                     f" of {p.format_mdeg(record.el_target_mdeg)}"
+                )
+        elif isinstance(record, p.Rx):
+            # The radio's once-a-second summary. Hidden for the same reason
+            # as the heartbeat; the window's radio panel is where it is
+            # meant to be watched.
+            if self.verbose:
+                state = "on" if record.enabled else "OFF"
+                self.say(
+                    f"       radio {state:>3}   ok {record.ok}  "
+                    f"bad {record.bad}  seq {record.seq}  "
+                    f"steered {record.targets}"
+                    + ("" if record.enabled
+                       else f"  - {record.error_message()}")
                 )
         elif isinstance(record, p.Info) and record.text:
             mark = "  ??" if record.malformed else "    "
@@ -400,12 +416,13 @@ class Console:
             # Worth saying, because arming on its own looks like nothing
             # happened - and then the watchdog quietly undoes it.
             self.say(
-                "  armed. Nothing will move until targets arrive, and the "
-                "Pico gives up if they stop."
+                "  armed to follow the radio. Nothing moves until a usable "
+                f"position arrives, and the Pico gives up {p.TRACK_TIMEOUT_S} "
+                "s without one."
             )
             self.say(
-                "  to send them, close this prompt and run: "
-                "py -m gs.track --sim"
+                "  'verbose on' shows the radio and tracking lines. To send "
+                "targets from here instead: py -m gs.track --sim"
             )
 
     def report_track(self, trk: p.Trk) -> None:

@@ -21,7 +21,7 @@ The two directions, one line each, "\n" terminated:
     SAVE,<id>                           CFG,<id>,<az_accel>,...
     DEFAULTS,<id>                       GEAR,<id>,<ON|OFF>,<az_num>,...
     SETTINGS,<id>                       TRK,<id>,<ON|OFF>,<az_target>,...
-    GEAR,<id>[,<ON|OFF>]
+    GEAR,<id>[,<ON|OFF>]                RX,<ON|OFF>,ok=<n>,bad=<n>,...
     TRACK,<id>[,<ON|OFF|REPLAY>]
     TARGET,<id>,<az_mdeg>,<el_mdeg>
 
@@ -49,6 +49,19 @@ here all end a replay. A target is absolute, names both axes, and is answered wi
 at all** when accepted - it arrives several times a second and an ACK apiece
 would double the traffic without saying anything the TRK stream is not
 already saying. Only a refusal comes back.
+
+On firmware with the radio receiver built in, TRACK ON means **follow the
+rocket over the radio**: the ground Pico turns each position it receives into
+a target itself, and is refused with ERR station if it has no ground-station
+position to point from. A TARGET from here takes over from the radio, so a
+laptop source still works - it just has to keep sending. TRACK OFF also
+resets the radio's packet ordering, which is the only way a transmitter that
+restarted (its sequence back at 0) is heard again.
+
+RX is that receiver's once-a-second summary, unprompted and with no id.
+Every number in it is a total since the Pico started, or a worst case since
+then; `radio.py` turns them into rates and ages. It is sent only when there
+is room in the USB buffer, so one can go missing.
 
 TRK answers TRACK, and also arrives unprompted a few times a second while
 tracking, with an id of 0. It is the only report that comes out while an axis
@@ -117,6 +130,11 @@ OFF = "OFF"
 # firmware. The TRK replies still say ON - it is armed.
 REPLAY = "REPLAY"
 
+# Seconds the Pico keeps tracking with no target before it gives up: a copy
+# of TRACK_TIMEOUT_MS in motor_config.hpp, which no reply carries. Only what
+# the laptop says uses it - change it when the firmware's changes.
+TRACK_TIMEOUT_S = 15
+
 # What SET can change: acceleration in deg/sec/sec, the travel limits and the
 # deadband in degrees. All cross the wire in thousandths, like every other
 # number.
@@ -143,7 +161,28 @@ ERR_MEANING = {
     "flash": "the Pico could not write its flash, so nothing was saved",
     "track": "tracking is not armed - send track on first",
     "replay": "this firmware has no replay station set in replay_config.hpp",
+    # Not from err_name(): main.cpp sends this one itself, before decide().
+    "station": "the ground station's position is not set in radio_config.hpp, "
+               "so the Pico cannot point at the rocket - set "
+               "RADIO_LIVE_STATION and reflash",
 }
+
+# The radio's status code in an RX line - a RadioLib error number from
+# initialising the radio or restarting reception. The ones worth putting into
+# words; anything else is reported by number. Values from RadioLib 7.8.1's
+# TypeDef.h, the release the firmware builds against.
+RADIO_ERROR_MEANING = {
+    0: "no fault",
+    -2: "the radio chip did not answer - check its wiring, 3V3 and ground",
+    -12: "the radio refused the frequency in radio_config.hpp",
+    -13: "the radio refused the output power in radio_config.hpp",
+    -16: "an SPI write to the radio did not read back - check the wiring",
+}
+
+
+def radio_error_message(code: int) -> str:
+    """A radio status code in words, for the operator."""
+    return RADIO_ERROR_MEANING.get(code, f"RadioLib error {code}")
 
 
 class CommandError(ValueError):
@@ -721,6 +760,60 @@ class Mstat(Reply):
 
 
 @dataclass(frozen=True)
+class Rx(Reply):
+    """The radio receiver's once-a-second summary. No id - nobody asked.
+
+    Totals since the Pico started, so a rate needs two of these and a clock:
+    see `radio.LinkWatch`. They all go back to zero when the Pico restarts.
+
+    `enabled` is whether reception is running, not whether tracking is
+    armed - packets are counted while disarmed too. `ok` counts positions
+    that decoded and were newer than the last one; `targets` counts the ones
+    that then became a motor target, which only happens while armed for the
+    radio. `bad` lumps together a bad read, a wrong length, a failed decode
+    and an out-of-order packet - it is not a count of packets lost in the
+    air, which nothing on the ground can know.
+    """
+
+    enabled: bool
+    ok: int
+    bad: int
+    seq: int
+    targets: int
+    error: int
+    # Worst cases since startup, in microseconds: one pass of the receive
+    # check, and the gap between two passes of the whole motor loop.
+    rx_max_us: int
+    loop_max_us: int
+
+    def error_message(self) -> str:
+        return radio_error_message(self.error)
+
+
+# The RX fields after the ON/OFF word, as they appear on the wire, with the
+# Rx attribute each one fills.
+_RX_KEYS = (
+    ("ok", "ok"), ("bad", "bad"), ("seq", "seq"), ("tgt", "targets"),
+    ("e", "error"), ("rx", "rx_max_us"), ("gap", "loop_max_us"),
+)
+
+
+def _parse_rx(f: list[str]) -> Rx:
+    # `key=value` rather than bare numbers, so each one is checked against
+    # the name it should have: a field slipped out of place is a bad line,
+    # not a plausible wrong number.
+    if len(f) != 2 + len(_RX_KEYS):
+        raise ValueError("wrong field count for RX")
+    values = {}
+    for text, (key, attr) in zip(f[2:], _RX_KEYS):
+        name, sep, number = text.partition("=")
+        if name != key or not sep:
+            raise ValueError(f"expected {key}=, got {text!r}")
+        values[attr] = _int(number)
+    return Rx(enabled=_word(f[1], ON, OFF), **values)
+
+
+@dataclass(frozen=True)
 class Err(Reply):
     """A command was refused.
 
@@ -791,9 +884,18 @@ class Info(Reply):
 RECORD_NAMES = frozenset(
     {
         "ACK", "PLAN", "DONE", "POS", "PIN", "LIM", "CFG", "GEAR", "TRK",
-        "PONG", "MSTAT", "ERR",
+        "PONG", "MSTAT", "ERR", "RX",
     }
 )
+
+
+def is_chatter(record: Reply) -> bool:
+    """True for a line nobody asked for: heartbeat, radio summary, text, and
+    the TRK stream (id 0). None of these can be the answer to a command, so
+    a reader waiting for one must not keep them as if they were."""
+    return isinstance(record, (Mstat, Rx, Info)) or (
+        isinstance(record, Trk) and record.id == 0
+    )
 
 
 def _int(text: str) -> int:
@@ -960,6 +1062,9 @@ def parse_reply(line: str) -> Reply:
 
         if name == "ERR":
             return _parse_err(f)
+
+        if name == "RX":
+            return _parse_rx(f)
 
     except ValueError:
         return Info(text, malformed=True)
