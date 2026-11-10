@@ -69,7 +69,7 @@ inline constexpr RadioPositionSource RADIO_POSITION_SOURCE =
  */
 inline constexpr std::optional<GPSPosition> RADIO_LIVE_STATION =
     GPSPosition{
-        37.1950303431,
-        -80.3944877669,
+        37.1951882756,
+        -80.3948577242,
         648.0 - 32.815 // MSL height plus estimated EGM96 geoid separation.
 };
