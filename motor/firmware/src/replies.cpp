@@ -74,6 +74,7 @@ const char *verb_name(Verb v)
     case Verb::Gear:     return "GEAR";
     case Verb::Track:    return "TRACK";
     case Verb::Target:   return "TARGET";
+    case Verb::Station:  return "STATION";
     case Verb::None:     break;
     }
     return "NONE";
@@ -108,6 +109,7 @@ const char *err_name(ErrCode e)
     case ErrCode::Flash:      return "flash";
     case ErrCode::NotTracking: return "track";
     case ErrCode::NoReplay:    return "replay";
+    case ErrCode::StationFixed: return "fixed";
     }
     return "unknown";
 }
@@ -266,6 +268,33 @@ size_t format_pong(char *buf, size_t n, uint16_t id, const char *target,
                   snprintf(buf, n, "PONG,%u,%s,%s,%lu\n",
                            static_cast<unsigned>(id), t, v,
                            static_cast<unsigned long>(uptime_ms)));
+}
+
+namespace {
+
+const char *station_from_name(StationFrom f)
+{
+    switch (f) {
+    case StationFrom::BuiltIn: return "BUILTIN";
+    case StationFrom::Set:     return "SET";
+    case StationFrom::Replay:  return "REPLAY";
+    case StationFrom::None:    break;
+    }
+    return "NONE";
+}
+
+}  // namespace
+
+size_t format_station(char *buf, size_t n, uint16_t id,
+                      const StationReport &r)
+{
+    return finish(buf, n,
+                  snprintf(buf, n, "STATION,%u,%s,%ld,%ld,%ld\n",
+                           static_cast<unsigned>(id),
+                           station_from_name(r.from),
+                           static_cast<long>(r.lat_e7),
+                           static_cast<long>(r.lon_e7),
+                           static_cast<long>(r.alt_mm)));
 }
 
 size_t format_mstat(char *buf, size_t n, uint32_t uptime_s, int32_t az_mdeg,

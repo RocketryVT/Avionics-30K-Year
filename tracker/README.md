@@ -59,7 +59,7 @@ inline constexpr RadioPositionSource RADIO_POSITION_SOURCE =
 
 `Replay` uses the existing trajectory and the synthetic station in [replay_config.hpp](tests/bench_tests/replay/replay_config.hpp). The station is 250 ft (76.2 m) south of the simulated launch point; zero station altitude and zero geoid separation are bench assumptions.
 
-For live reception, change the selection to `RadioPositionSource::Gps` and set `RADIO_LIVE_STATION` to a verified `GPSPosition`: latitude and longitude in decimal degrees, altitude in meters above the **WGS84 ellipsoid**. Its default is `std::nullopt`, which refuses radio arming with `ERR,<id>,station,unset or invalid`. The Florida replay station is never selected for live GPS mode.
+For live reception, change the selection to `RadioPositionSource::Gps`. `RADIO_LIVE_STATION` is the ground station the Pico **starts** with: latitude and longitude in decimal degrees, altitude in meters above the **WGS84 ellipsoid**. Moving the station no longer needs a reflash: the motor window's track panel sets it at run time with the `STATION` command, keeps it on the laptop, and sends it on every connect and every radio arm (see [Setting the ground station](../motor/README.md#setting-the-ground-station)). With `std::nullopt` here and nothing sent from the window, radio arming is refused with `ERR,<id>,station,unset or invalid`. The Florida replay station is never selected for live GPS mode, and a `Replay` build refuses `STATION` with `ERR fixed`, because its radio carries the simulated flight.
 
 Rebuild and flash **both boards** after changing the selection. The packet does not identify GPS versus replay mode, so the two flashed images must agree.
 

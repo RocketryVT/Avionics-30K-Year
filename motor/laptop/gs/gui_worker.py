@@ -45,14 +45,17 @@ can work around.
 
 from __future__ import annotations
 
+import os
 import queue
 import threading
 import time
 from dataclasses import dataclass, field, replace
 
+from gs import flight_log
 from gs import motor
 from gs import protocol as p
 from gs import radio
+from gs import station_file
 from gs import session as sn
 from gs import targets as tg
 from gs import tracking
@@ -120,7 +123,13 @@ _UNPLUGGED = dict(target="", version="", uptime_ms=0, moving=False,
                   pico_steers=False, from_radio=False, radio_dropped=False,
                   source_name="", targets_sent=0, sample=None, pos=None,
                   gear=None, cfg=None, lim=None, heartbeat_at=None,
-                  link=None)
+                  link=None, station=None, station_unsupported=False)
+
+# Said when the ground Pico answers STATION with "no such command": it was
+# flashed before the station could be set from here.
+OLD_FIRMWARE = ("this ground Pico's firmware cannot take a station from the "
+                "window, so it points from radio_config.hpp's - reflash it "
+                "with the current build")
 
 
 @dataclass(frozen=True)
@@ -177,12 +186,28 @@ class State:
     cfg: p.Cfg | None = None
     lim: p.Lim | None = None
 
+    # The ground station the radio is pointed from, as the Pico last said.
+    # `station_unsupported` is true when its firmware has no STATION command.
+    station: p.Station | None = None
+    station_unsupported: bool = False
+    # The station kept on this laptop (station_file.py), sent on every
+    # connect and every radio arm. Not forgotten on unplugging - it is the
+    # laptop's, not the Pico's.
+    station_saved: station_file.SavedStation | None = None
+
     # Monotonic time the last heartbeat arrived, so the window can show how
     # long ago. None until one has been seen.
     heartbeat_at: float | None = None
 
     # What went wrong with the last poll, or "" if nothing did.
     error: str = ""
+
+    # The tracking CSV: its full path while one is open, and the rows in it.
+    # `csv_error` says why the last one could not be opened or written.
+    # Not forgotten on unplugging - the file is the laptop's, not the Pico's.
+    csv_path: str = ""
+    csv_rows: int = 0
+    csv_error: str = ""
 
     @property
     def zeroed(self) -> bool:
@@ -314,7 +339,8 @@ class MotorWorker(threading.Thread):
     """
 
     def __init__(self, port: str | None = None, open_session=None,
-                 clock=time.monotonic, results=None):
+                 clock=time.monotonic, results=None,
+                 station_path=station_file.DEFAULT_PATH):
         super().__init__(daemon=True, name="motor-worker")
         self.events: queue.Queue = queue.Queue()
         self._jobs: queue.Queue = queue.Queue()
@@ -351,6 +377,23 @@ class MotorWorker(threading.Thread):
         # Results file for `true`, `note` and `rows`, when the window was
         # started with --log. Handed to the console when it is built.
         self.results = results
+
+        # The tracking CSV, while the window's "log to CSV" box is ticked.
+        # Written here because this is the thread that reads the TRK reports
+        # it is made of. Times in it count from when it was opened.
+        self._csv: flight_log.FlightLog | None = None
+        self._csv_began = 0.0
+
+        # The ground station kept on this laptop. Read once here; after
+        # that only this thread writes it, when the window sets a new one.
+        self._station_path = station_path
+        try:
+            saved = station_file.load(station_path)
+        except ValueError as exc:
+            saved = None
+            self._emit(EVENT_NOTE, f"the saved station is lost - {exc}. "
+                                   "Set it again in the track panel.")
+        self._state = replace(self._state, station_saved=saved)
 
     # --- the UI thread's side ----------------------------------------------
 
@@ -448,6 +491,22 @@ class MotorWorker(threading.Thread):
         """Move a manual source's target. Ignored by any other source."""
         self._jobs.put(_Job("track_point", (az_deg, el_deg)))
 
+    def log_csv(self, on: bool) -> None:
+        """Start a new tracking CSV, or close the open one.
+
+        Needs no Pico, so it can be ticked before one is plugged in. Rows
+        only arrive while tracking, so tick it before arming.
+        """
+        self._jobs.put(_Job("csv", (on,)))
+
+    def set_station(self, station: station_file.SavedStation) -> None:
+        """Keep this as the ground station, and send it to the Pico.
+
+        Needs no Pico: it is saved on the laptop either way, and goes to the
+        Pico when one connects. Refused by the Pico while tracking.
+        """
+        self._jobs.put(_Job("station", (station,)))
+
     # --- typed commands ----------------------------------------------------
 
     def run_line(self, text: str) -> None:
@@ -494,7 +553,9 @@ class MotorWorker(threading.Thread):
         self._console.results = self.results
 
         self._link = radio.LinkWatch(self._clock())
-        self._set_state(connected=True, port=port or "", error="",
+        # With no port given the Pico was found by itself; show where.
+        found = getattr(session.conn, "port", None)
+        self._set_state(connected=True, port=port or found or "", error="",
                         rebooted=False, link=self._link.status)
 
         # Collect the banner before the first poll, the way motor.py does, so
@@ -504,9 +565,15 @@ class MotorWorker(threading.Thread):
         except sn.SessionError as exc:
             self._emit(EVENT_NOTE, f"while reading the banner: {exc}")
 
+        # The Pico starts with radio_config.hpp's station; ours replaces it
+        # straight away, so the window never shows one it will not use.
+        self._sync_station(session)
+
     def _note_record(self, record: p.Reply) -> None:
         if self._loop is not None:
             self._loop.note(record)
+        if isinstance(record, p.Trk):
+            self._csv_row(record)
         if isinstance(record, p.Rx):
             self._note_rx(record)
             # Not logged: once a second it would bury everything else in the
@@ -539,6 +606,66 @@ class MotorWorker(threading.Thread):
                        ". The Pico does not restart it - fix the cause and "
                        "restart the Pico.")
 
+    # --- the tracking CSV ----------------------------------------------------
+
+    def _set_csv(self, on: bool) -> None:
+        if not on:
+            self._close_csv("stopped logging")
+            return
+        if self._csv is not None:
+            return
+        try:
+            # default_path makes the logs folder, so it can fail as well.
+            path = os.path.abspath(flight_log.default_path())
+            log = flight_log.FlightLog(path=path)
+            log.open()
+        except OSError as exc:
+            self._set_state(csv_path="", csv_rows=0,
+                            csv_error="could not open the file")
+            self._emit(EVENT_NOTE, f"could not start the CSV: {exc}")
+            return
+        self._csv = log
+        self._csv_began = self._clock()
+        self._set_state(csv_path=path, csv_rows=0, csv_error="")
+        self._emit(EVENT_NOTE, "logging tracking to " + path)
+        if self._loop is not None:
+            self._csv_row(None, "logging started while tracking")
+
+    def _csv_row(self, trk: p.Trk | None, note: str = "") -> None:
+        """One row, if a CSV is open. Never lets a file problem near the
+        tracking: a write that fails closes the CSV and says so."""
+        log = self._csv
+        if log is None:
+            return
+        st = self._state
+        log.pico = f"{st.target} {st.version}".strip()
+        log.gear = "" if st.gear is None else (
+            "on" if st.gear.geared else "off")
+        if self._source is not None:
+            log.source = self._source.name
+        rx = self._link.status.rx if self._link is not None else None
+        try:
+            log.add(self._clock() - self._csv_began, None, trk, note, rx=rx)
+        except OSError as exc:
+            self._csv = None
+            log.close()
+            self._set_state(csv_path="", csv_error="writing failed")
+            self._emit(EVENT_NOTE,
+                       f"the CSV stopped after {log.rows} rows: {exc}")
+            return
+        # Not emitted on its own: ten rows a second would be ten window
+        # updates a second. The next state the worker sends carries it.
+        self._state = replace(self._state, csv_rows=log.rows)
+
+    def _close_csv(self, why: str) -> None:
+        log = self._csv
+        if log is None:
+            return
+        self._csv = None
+        log.close()
+        self._set_state(csv_path="", csv_rows=0)
+        self._emit(EVENT_NOTE, f"{why} - {log.rows} rows in {log.path}")
+
     def _close(self) -> None:
         # A tracking loop cannot outlive its port. Left behind, it would
         # keep the run loop in its tracking branch, which never reconnects.
@@ -569,6 +696,7 @@ class MotorWorker(threading.Thread):
             gear = session.gear()
             cfg = session.settings()
             lim = session.limits()
+            station = self._ask_station(session)
         except sn.Refused as refused:
             # Everything but stop and estop is refused while an axis turns,
             # so this is how a move looks from out here.
@@ -588,8 +716,97 @@ class MotorWorker(threading.Thread):
             self._set_state(connected=not lost, error=str(exc))
             return
 
-        self._set_state(pos=pos, gear=gear, cfg=cfg, lim=lim, moving=False,
-                        error="")
+        self._set_state(pos=pos, gear=gear, cfg=cfg, lim=lim,
+                        station=station, moving=False, error="")
+
+    # --- the ground station --------------------------------------------------
+
+    def _ask_station(self, session) -> p.Station | None:
+        """What the Pico is pointing the radio from, or None if its firmware
+        is too old to say. Any other refusal is the caller's to handle."""
+        if self._state.station_unsupported:
+            return None
+        try:
+            return session.station()
+        except sn.Refused as refused:
+            if refused.err.code != "verb":
+                raise
+        self._set_state(station_unsupported=True, station=None)
+        self._emit(EVENT_NOTE, OLD_FIRMWARE)
+        return None
+
+    def _send_station(self, session) -> p.Station | None:
+        """Send the saved station, if there is one the Pico can take.
+
+        Returns what the Pico is using afterwards, or None if nothing was
+        sent: nothing saved, firmware too old, or a replay build whose
+        station is fixed. Raises Refused for anything else - busy while the
+        axes are still braking, most often.
+        """
+        saved = self._state.station_saved
+        if saved is None or self._state.station_unsupported:
+            return None
+        known = self._state.station
+        if known is not None and not known.settable:
+            return None
+        try:
+            station = session.set_station(saved.lat_deg, saved.lon_deg,
+                                          saved.alt_m)
+        except sn.Refused as refused:
+            if refused.err.code == "verb":
+                self._set_state(station_unsupported=True, station=None)
+                self._emit(EVENT_NOTE, OLD_FIRMWARE)
+                return None
+            if refused.err.code == "fixed":
+                # A replay build, found out by trying. Not a fault: its
+                # radio is meant to point from the replay's station.
+                self._set_state(station=self._ask_station(session))
+                return None
+            raise
+        self._set_state(station=station)
+        return station
+
+    def _sync_station(self, session) -> None:
+        """On connecting: hand over the saved station unless the Pico has it.
+
+        Never stops the connection going ahead. A Pico found already
+        tracking refuses as busy, and gets the station when the radio is
+        next armed instead.
+        """
+        try:
+            station = self._ask_station(session)
+            self._set_state(station=station)
+            saved = self._state.station_saved
+            if saved is None or saved.matches(station):
+                return
+            sent = self._send_station(session)
+            if sent is not None:
+                self._emit(EVENT_NOTE, "ground station sent to the Pico: "
+                                       + sent.where())
+        except sn.Refused as refused:
+            self._emit(EVENT_NOTE, "the saved station was not sent yet ("
+                       + refused.err.message() + ") - it goes when the "
+                       "radio is next armed")
+        except sn.SessionError as exc:
+            self._emit(EVENT_NOTE, f"while sending the station: {exc}")
+
+    def _keep_station(self, saved: station_file.SavedStation) -> None:
+        """The window's "set station": save it here, then send it.
+
+        Saved first and whatever happens, so a station typed in with no Pico
+        plugged in is there when one is.
+        """
+        try:
+            station_file.save(saved, self._station_path)
+            where = "saved on this laptop"
+        except OSError as exc:
+            where = f"NOT saved on this laptop ({exc}) - only until it closes"
+        self._set_state(station_saved=saved)
+        if self._session is None:
+            self._emit(EVENT_NOTE, f"ground station {saved.where()} {where}."
+                                   " It goes to the Pico when one connects.")
+            return
+        self._handle_job(_Job("station_send", (where,)))
 
     # --- carrying out a job ------------------------------------------------
 
@@ -712,6 +929,18 @@ class MotorWorker(threading.Thread):
         elif job.name == "defaults":
             session.defaults()
             self._emit(EVENT_NOTE, "back to the built-in settings")
+        elif job.name == "station_send":
+            sent = self._send_station(session)
+            saved = self._state.station_saved
+            if sent is not None:
+                self._emit(EVENT_NOTE,
+                           f"ground station {sent.where()} - {job.args[0]}, "
+                           "and the Pico is pointing the radio from it")
+            elif saved is not None and not self._state.station_unsupported:
+                self._emit(EVENT_NOTE,
+                           f"ground station {saved.where()} - {job.args[0]}."
+                           " This build's radio plays the simulated flight, "
+                           "so the Pico keeps replay_config.hpp's station")
         elif job.name == "track_start":
             self._start_tracking(session, *job.args)
         elif job.name == "track_stop":
@@ -824,6 +1053,13 @@ class MotorWorker(threading.Thread):
                         pico_replay=source.pico_replay,
                         from_radio=from_radio, radio_dropped=False,
                         targets_sent=0, sample=None)
+        # With the station on it, because it is no longer in the code: this
+        # row is the only record of where the angles were worked out from.
+        station = self._state.station if from_radio else None
+        armed = "armed: " + source.name
+        if station is not None and station.usable:
+            armed += " from station " + station.where()
+        self._csv_row(None, armed)
         if source.pico_replay:
             self._emit(EVENT_NOTE,
                        "tracking armed - the Pico is flying its built-in "
@@ -832,6 +1068,10 @@ class MotorWorker(threading.Thread):
             self._emit(EVENT_NOTE,
                        "tracking armed - the Pico is following the rocket "
                        "over the radio, nothing is sent from here")
+            if station is not None and station.usable:
+                self._emit(EVENT_NOTE,
+                           "pointing from the ground station at "
+                           + station.describe())
             link = self._state.link
             if link is None or not link.hearing(self._clock()):
                 # Said now, because the Pico's watchdog counts from the
@@ -855,7 +1095,8 @@ class MotorWorker(threading.Thread):
         the antenna would never move. TRACK OFF is never refused, and with
         nothing armed it changes nothing else.
 
-        Then TRACK ON, which the Pico refuses as busy until both axes are at
+        Then the saved ground station (see _send_station), and TRACK ON.
+        Both are refused as busy until both axes are at
         rest. Straight after its watchdog has stopped a session they are
         still braking, so arming is tried again until it goes through. The
         stops stay live throughout. Returns the TRK, or None if a stop or
@@ -866,6 +1107,10 @@ class MotorWorker(threading.Thread):
         said = False
         while True:
             try:
+                # The saved station, every time. The Pico forgets it when it
+                # restarts, and arming is the moment it has to be right. It
+                # is refused as busy while braking, the same as TRACK ON.
+                self._send_station(session)
                 return loop.arm()
             except sn.Refused as refused:
                 if refused.err.code != "busy" or self._clock() >= deadline:
@@ -892,6 +1137,7 @@ class MotorWorker(threading.Thread):
             self._source = None
             return
         self._loop.disarm()
+        self._csv_row(None, f"tracking {why or 'ended'}")
         self._loop = None
         self._source = None
         self._set_state(tracking=False, sample=None)
@@ -916,6 +1162,7 @@ class MotorWorker(threading.Thread):
             sample = loop.tick()
         except sn.SessionError as exc:
             self._emit(EVENT_NOTE, f"tracking stopped: {exc}")
+            self._csv_row(None, f"tracking stopped: {exc}")
             if "lost the connection" in str(exc):
                 self._close()
                 self._set_state(connected=False, error=str(exc))
@@ -938,6 +1185,7 @@ class MotorWorker(threading.Thread):
             source = self._source
             replay = source is not None and source.pico_replay
             from_radio = isinstance(source, tg.RadioSource)
+            self._csv_row(None, "the Pico stopped tracking by itself")
             self._loop = None
             self._source = None
             self._set_state(tracking=False, sample=sample,
@@ -978,6 +1226,10 @@ class MotorWorker(threading.Thread):
                 if job is not None:
                     if job.name == "reconnect":
                         self._connect(job.args[0] or self._port)
+                    elif job.name == "csv":
+                        self._set_csv(*job.args)
+                    elif job.name == "station":
+                        self._keep_station(*job.args)
                     elif job.name != "poll":
                         self._handle_job(job)
                     next_poll = self._clock()
@@ -1004,6 +1256,7 @@ class MotorWorker(threading.Thread):
         finally:
             self._stop_tracking(None)
             self._close()
+            self._close_csv("window closed")
 
 
 def _record_text(record: p.Reply) -> str:

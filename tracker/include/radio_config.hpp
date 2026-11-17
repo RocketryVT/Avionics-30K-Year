@@ -61,15 +61,20 @@ inline constexpr RadioPositionSource RADIO_POSITION_SOURCE =
     RadioPositionSource::Gps;
 
 /**
- * @brief Defines the ground-station reference used only in live GPS mode.
+ * @brief Defines the ground-station reference the ground Pico starts with,
+ *        used only in live GPS mode.
  *
  * @note Latitude/longitude are decimal degrees; altitude is WGS84 ellipsoidal
- *       meters. std::nullopt refuses radio arming in GPS mode. Replay uses
- *       REPLAY_STATION from replay_config.hpp instead.
+ *       meters. Replay uses REPLAY_STATION from replay_config.hpp instead.
+ * @note No reflash is needed to move the station: the motor window
+ *       (py -m gs.gui) sets it with the STATION command and sends its saved
+ *       one on every connect and radio arm. This is only the fallback for a
+ *       Pico with no window, and std::nullopt refuses radio arming until a
+ *       STATION arrives.
  */
 inline constexpr std::optional<GPSPosition> RADIO_LIVE_STATION =
     GPSPosition{
-        37.1951882756,
-        -80.3948577242,
+        37.1950303431,
+        -80.3944877669,
         648.0 - 32.815 // MSL height plus estimated EGM96 geoid separation.
 };

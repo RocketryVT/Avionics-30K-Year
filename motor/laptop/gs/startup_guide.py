@@ -142,22 +142,51 @@ TRACK_ROCKET = Part(
             ),
         ),
         Step(
+            title="Set the ground station",
+            do="In the track panel choose \"the rocket (radio)\". Type "
+               "where the antenna stands: lat and lon in decimal degrees (a "
+               "\"lat, lon\" pair pasted from a map into the lat box fills "
+               "both), MSL - its height above sea level in metres - and the "
+               "geoid separation, about -33 around Blacksburg. Press \"set "
+               "station\". No reflash: the window keeps it on this laptop "
+               "and sends it on every connect and every arm.",
+            look="the line under the station boxes",
+            expect=("Pico using 37.1950303, -80.3944878, 615.185 m above "
+                    "the ellipsoid - this one, saved on this laptop",),
+            note="In green. The height is MSL plus the geoid: the Pico "
+                 "measures from the WGS84 ellipsoid, as the rocket's GPS "
+                 "altitude is. A GPS's GGA sentence carries both numbers. "
+                 "Already set from last time? Check it is where you are "
+                 "today.",
+            otherwise=(
+                ("Pico using 37.1951883, -80.3948577, 615.185 m "
+                 "(radio_config.hpp's), NOT the saved one - arming sends "
+                 "the saved one",
+                 "The Pico restarted since the station was sent. Nothing "
+                 "to do - arming sends it again - or press \"set station\" "
+                 "to send it now."),
+                ("this firmware cannot take a station - it points from "
+                 "radio_config.hpp's. Reflash the ground Pico.",
+                 "Flash gs_motor built from the current lora-integration "
+                 "branch."),
+            ),
+        ),
+        Step(
             title="Arm tracking on the rocket",
-            do="In the track panel choose \"the rocket (radio)\", press "
+            do="To keep a record of the flight, tick \"log to CSV\" first. "
+               "Then in the track panel choose \"the rocket (radio)\", press "
                "\"ARM tracking\" and confirm.",
             look="the status line at the bottom, and the note beside the "
                  "buttons",
             expect=("TRACKING - the Pico is following the radio",
                     "following the radio - 5.0 targets/s"),
             otherwise=(
-                ("the ground station's position is not set in "
-                 "radio_config.hpp",
-                 "Set RADIO_LIVE_STATION in radio_config.hpp and reflash "
-                 "the ground Pico."),
+                ("set the ground station first: the Pico has none, so it "
+                 "would refuse to arm the radio",
+                 "Do the step above."),
                 ("following the radio - packets but NO targets (station?)",
-                 "Positions arrive but give no pointing. Check "
-                 "RADIO_LIVE_STATION - a rocket within 5 m of it gives "
-                 "none."),
+                 "Positions arrive but give no pointing. Check the station "
+                 "row - a rocket within 5 m of it gives none."),
             ),
         ),
         Step(

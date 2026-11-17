@@ -82,6 +82,9 @@ struct MachineState {
     // these, because they were changed and not saved.
     bool settings_unsaved = false;
 
+    // The ground station the radio is pointed from, and where it came from.
+    StationReport station{StationFrom::None, 0, 0, 0};
+
     uint32_t uptime_ms = 0;
     const char *target = "";
     const char *version = "";
@@ -100,7 +103,17 @@ enum class Act {
     SetGear,      // change gear mode: gear, az_spec and el_spec together
     SetTrack,     // arm or disarm tracking, start or stop the replay
     SetTarget,    // point here: az_steps and el_steps
+    SetStation,   // point the radio from `station` from now on
 };
+
+// Where a STATION may be. Latitude and longitude are any place on Earth;
+// the altitude window is generous - a kilometre below the ellipsoid to ten
+// above - and only there to catch metres typed as millimetres or a sign
+// dropped. The laptop's protocol.py carries a copy.
+constexpr int32_t STATION_LAT_MAX_E7 = 900000000;   //  90 degrees
+constexpr int32_t STATION_LON_MAX_E7 = 1800000000;  // 180 degrees
+constexpr int32_t STATION_ALT_MIN_MM = -1000000;    //  -1 km
+constexpr int32_t STATION_ALT_MAX_MM = 10000000;    // +10 km
 
 // The most lines one command is answered with: a two-axis move's ACK and its
 // two PLANs.
@@ -144,6 +157,9 @@ struct Decision {
     GearMode gear    = GearMode::Direct;
     AxisSpec az_spec = AZ_SPEC;
     AxisSpec el_spec = EL_SPEC;
+
+    // SetStation: the ground station to point the radio from.
+    StationReport station{StationFrom::None, 0, 0, 0};
 
     // The complete lines to send, in order. There can be none: a stop during
     // a move is answered by the move's own DONE.

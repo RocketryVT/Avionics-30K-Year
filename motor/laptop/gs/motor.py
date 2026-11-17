@@ -72,6 +72,7 @@ HELP_TEXT = f"""\
   defaults                         back to the numbers in motor_config.hpp
   gear [on|off]                    count the final gear pair, or not
   track [on|off|replay]            follow the radio, stop, or fly the replay
+  station [<lat> <lon> <alt>]      where the radio is pointed from
   sweep [angle=45] [speeds=1,5,90] [pause]   one angle at each speed
   random [count=10] [speed=5] [seed=N] [pause]   angles within the limits
   true [row] <degrees>             what the protractor really reads
@@ -93,7 +94,10 @@ HELP_TEXT = f"""\
   first, then 'track on'.
   'track replay' has the Pico fly the simulated flight built into its
   firmware - a bench test. 'py -m gs.track' sends targets from the laptop
-  instead. 'track off' or 'stop' ends any of them."""
+  instead. 'track off' or 'stop' ends any of them.
+  'station' takes decimal degrees and metres above the WGS84 ellipsoid
+  (sea-level height plus the geoid separation), and lasts until the Pico
+  restarts. The window keeps one on the laptop and sends it itself."""
 
 
 class UsageError(Exception):
@@ -424,6 +428,30 @@ class Console:
                 "  'verbose on' shows the radio and tracking lines. To send "
                 "targets from here instead: py -m gs.track --sim"
             )
+
+    def do_station(self, args: list[str]) -> None:
+        """Report or move the ground station the radio is pointed from."""
+        if not args:
+            self.report_station(self.session.station())
+            return
+        if len(args) != 3:
+            raise UsageError(
+                "station [<lat> <lon> <metres above the WGS84 ellipsoid>]")
+        lat = _number(args[0], "latitude")
+        lon = _number(args[1], "longitude")
+        alt = _number(args[2], "altitude")
+        try:
+            station = self.session.set_station(lat, lon, alt)
+        except p.CommandError as exc:
+            raise UsageError(str(exc)) from None
+        self.report_station(station)
+        self.say("  until the Pico restarts. The window (py -m gs.gui) "
+                 "sends its own saved station")
+        self.say("  on every connect and every radio arm, so set it there "
+                 "if the window is in use.")
+
+    def report_station(self, station: p.Station) -> None:
+        self.say(f"  station {station.describe()}")
 
     def report_track(self, trk: p.Trk) -> None:
         self.say(f"  tracking {'ARMED' if trk.armed else 'off'}")
@@ -862,6 +890,7 @@ class Console:
         "defaults": do_defaults,
         "gear": do_gear,
         "track": do_track,
+        "station": do_station,
         "sweep": do_sweep,
         "random": do_random,
         "true": do_true,

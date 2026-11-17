@@ -299,7 +299,8 @@ constexpr AxisSpec AZ_SPEC = {
     9,       // steps_den     -> 44.444 steps per degree
     -180000, // min_mdeg      -180 degrees
     180000,  // max_mdeg      +180 degrees
-    false,   // invert_dir    No axis inverts now: all four specs are false.
+    false,   // invert_dir    Not inverted here, but geared azimuth is:
+             //               see AZ_SPEC_GEARED below.
              //               It was true from 26 Oct 2026 (commit dbaeee2),
              //               set while the azimuth driver was turning one
              //               way for every command, + or - - evidence from a
@@ -324,7 +325,11 @@ constexpr AxisSpec AZ_SPEC_GEARED =
     geared(AZ_SPEC, AZ_PAIR,
            -180000, // min_mdeg    -180 degrees of antenna
            180000,  // max_mdeg    +180 degrees of antenna
-           false);  // invert_dir  unverified - a ring and pinion may flip it
+           true);   // invert_dir  set 9 Nov 2026: with the gear on, a positive
+                    //             move turned the antenna counterclockwise
+                    //             seen from above. Pointing sends compass
+                    //             bearings, which run clockwise (east is
+                    //             +90), so tracking mirrored east and west.
 
 // ----------------------------------------------------------------------------
 // Elevation (the board calls it Servo 2)

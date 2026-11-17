@@ -178,8 +178,9 @@ the gap on its own.
 
 | | |
 | --- | --- |
-| `track on` | Select radio targets and arm. Needs both axes idle and zeroed, plus a configured station |
+| `track on` | Select radio targets and arm. Needs both axes idle and zeroed, plus a ground station |
 | `track off` | Disarm, ramping to a stop. Never refused |
+| `station [lat lon alt]` | Report or move the ground station the radio is pointed from - see [Setting the ground station](#setting-the-ground-station) |
 | `TARGET` | Where to point, absolute, both axes. Sent by the tracking program, not typed |
 
 **There is no plan and no end.** An ordinary move works out a whole trapezium
@@ -254,35 +255,104 @@ works before a Pico is plugged in.
    good one, how many were thrown away (in the last 5 s, and in total),
    how many per second are steering the antenna, the last sequence number,
    and the worst motor-loop gap.
-2. Zero both axes. The window keeps the Pico geared by itself.
-3. In the **track** panel, choose **the rocket (radio)** and press **ARM tracking**.
-   The confirmation warns you if no packets are arriving. The window sends
-   `TRACK OFF` before `TRACK ON`, which resets the Pico's packet ordering, so
-   a transmitter that restarted since the last session is heard again. If
-   the axes are still braking from the last session, it waits for them to
-   stop before arming. Nothing is sent from the laptop after that.
-4. While it runs, the note beside the buttons says `following the radio -
+2. Zero both axes. The window keeps the Pico geared by itself. To keep a
+   record of the flight, tick **log to CSV** (beside the tracking readout)
+   now, before arming - see [Recording a flight](#recording-a-flight).
+3. In the **track** panel, choose **the rocket (radio)**. Check the station
+   row: the line under it should be green and say the Pico is using the
+   station saved on this laptop. If it is not where you are today, type it
+   in and press **set station** - see
+   [Setting the ground station](#setting-the-ground-station).
+4. Press **ARM tracking**. The confirmation shows the station it will point
+   from, and warns you if no packets are arriving. The window sends
+   `TRACK OFF`, which resets the Pico's packet ordering so a transmitter
+   that restarted since the last session is heard again, then the saved
+   station, then `TRACK ON`. If the axes are still braking from the last
+   session, it waits for them to stop before arming. Nothing is sent from
+   the laptop after that.
+5. While it runs, the note beside the buttons says `following the radio -
    N targets/s`. `packets but NO targets` means positions are arriving but
    none turn into pointing, so check the station position. `NO PACKETS`
    means the link has gone quiet.
-5. If no usable position arrives for 15 s (including the first 15 s
+6. If no usable position arrives for 15 s (including the first 15 s
    after arming), the Pico stops tracking by itself and never re-arms. The
    window says `STOPPED` and lights **re-arm radio**: one click, no
-   confirmation, and the same arm sequence as step 3. STOP, E-STOP and
+   confirmation, and the same arm sequence as step 4. STOP, E-STOP and
    **disarm** withdraw the offer.
 
-If the Pico has no ground-station position for the radio, arming is refused
-with "the ground station's position is not set in radio_config.hpp". Set
-`RADIO_LIVE_STATION` and reflash. The `motor>` prompt hides the `RX` line
-unless `verbose on`.
+###### Setting the ground station
+
+The Pico works out where to point from the rocket's GPS position and the
+ground station's. The station used to be compiled in (`RADIO_LIVE_STATION`
+in `tracker/include/radio_config.hpp`), so moving it meant a rebuild and a
+reflash. That value is now only what the Pico starts with. In the window:
+
+1. In the **track** panel, choose **the rocket (radio)**. The station row
+   appears where the direction boxes were.
+2. Type **lat** and **lon** in decimal degrees, north and east positive.
+   Pasting a `lat, lon` pair from a map into the lat box fills both.
+3. Type **MSL**, the antenna's height above sea level in metres, and
+   **geoid**, the geoid separation in metres - about `-33` around
+   Blacksburg. A GPS's GGA sentence carries both. The Pico measures from
+   the WGS84 ellipsoid, as it does the rocket's GPS altitude, and
+   MSL + geoid is that height. Leaving the geoid out would tilt the
+   antenna about 2 degrees at a kilometre.
+4. Press **set station**. It works with no Pico plugged in.
+
+The window keeps the station in `motor/laptop/station.json` (ignored by git)
+and sends it to the Pico on every connect and every radio arm. The Pico only
+holds it until it restarts, so sending it again on arming is what keeps a
+restart from putting the built-in one back. The line under the boxes says
+what the Pico is really using: green when it is the saved one, amber when it
+is anything else (arming sends the saved one), red when it has none.
+
+The station cannot be changed while tracking (the Pico refuses it as
+`busy`): it would move every target mid-flight. A firmware built with
+`RADIO_POSITION_SOURCE` set to `Replay` points the radio from the replay's
+own station, which matches the simulated flight, and refuses a new one with
+`ERR fixed`. At the prompt, `station` shows the station and
+`station <lat> <lon> <alt>` sets it, with the altitude already above the
+ellipsoid. The window overrides a typed one on the next arm.
+
+###### Recording a flight
+
+Tick **log to CSV** and the window opens `logs/track_<date>_<time>.csv`
+under the folder it was started from (`motor/laptop/logs/` normally). The
+conversation pane says the full path, and the label under the box counts the
+rows. While tracking is armed, a row goes in for every report the Pico sends
+(ten a second), and a row with a `note` marks arming and stopping, including
+the Pico's own watchdog stop. Untick it, or close the window, to finish the
+file. Each tick starts a new file. It works for every source, not just the
+radio, and ticking it mid-flight starts logging from there.
+
+| Column | What it is |
+| --- | --- |
+| `t_s`, `when` | Seconds since the file was opened, and the laptop's clock |
+| `armed` | `on` while tracking. The row where it turns `off` is where tracking stopped |
+| `target_az`, `target_el` | Where the Pico is pointing to. For the radio, the angle it worked out from the rocket's latest GPS position |
+| `actual_az`, `actual_el` | Where the motors have got to |
+| `error_az`, `error_el` | Target minus actual: how far behind the antenna is |
+| `rate_az`, `rate_el` | How fast each axis is turning, deg/s |
+| `rx_seq`, `rx_heard`, `rx_rejected`, `rx_targets` | From the radio report, once a second: the last packet's sequence number, and packets heard, thrown away, and turned into targets since the Pico started |
+| `source`, `gear`, `pico` | What was being followed, the gearing, and the firmware version |
+| `source_az`, `source_el`, `fix_age_s` | Blank for the radio: the Pico works the angle out itself. Filled by `py -m gs.track --log` |
+
+The rocket's latitude, longitude and altitude are not in it: the ground Pico
+does not send them to the laptop. The ground station's are, in the `note` on
+the row where radio tracking was armed.
+
+If the Pico has no ground-station position for the radio, the window will not
+arm it and says "set the ground station first" - see
+[Setting the ground station](#setting-the-ground-station). The `motor>` prompt
+hides the `RX` line unless `verbose on`.
 
 Laptop target tools remain available. In the window that is the **track** panel; from a
 terminal it is `py -m gs.track`, which arms tracking itself, sends the
 targets, and disarms when it finishes. Close the `motor>` prompt first - only
 one program can have the port open. A USB `TARGET` takes ownership from radio
 and local replay; an explicit `TRACK ON` selects radio again. Keep the radio
-transmitter off for laptop-only motor tests. Radio arming still requires the
-station selected in `radio_config.hpp` to be configured.
+transmitter off for laptop-only motor tests. Radio arming still requires a
+ground station: the window's, or the one built into `radio_config.hpp`.
 
 The Pico can also supply its own. In the window's **track** panel, choose
 **the Pico's built-in flight**, and press **ARM tracking**. That arms

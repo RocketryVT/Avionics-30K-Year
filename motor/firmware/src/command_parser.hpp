@@ -27,6 +27,15 @@
 //   GEAR,<id>[,<ON|OFF>]                          report or change gear mode
 //   TRACK,<id>[,<ON|OFF|REPLAY>]                  report or arm tracking
 //   TARGET,<id>,<az_mdeg>,<el_mdeg>               point here (absolute)
+//   STATION,<id>[,<lat_e7>,<lon_e7>,<alt_mm>]     report or set where the
+//                                                 ground station is
+//
+// STATION with no position asks which one the radio is pointed from. With
+// one it replaces it until the Pico restarts: latitude and longitude in
+// ten-millionths of a degree (about a centimetre), altitude in millimetres
+// above the WGS84 ellipsoid. The one in radio_config.hpp is only what the
+// Pico starts with - the laptop's window sends its own on every connect and
+// every time it arms the radio, so moving the station needs no reflash.
 //
 // GEAR with no mode asks which one is in force. With ON or OFF it switches,
 // which changes what a degree means on both axes - see motor_config.hpp.
@@ -75,6 +84,7 @@ enum class Verb {
     Gear,
     Track,
     Target,
+    Station,
 };
 
 enum class AxisId {
@@ -140,6 +150,14 @@ struct Command {
     // than optional halves on a command that arrives several times a second.
     int32_t az_mdeg = 0;
     int32_t el_mdeg = 0;
+
+    // STATION: was a position given, and what. Without one it is a
+    // question. Whole numbers like everything else on the wire: 1e-7
+    // degrees fits latitude and longitude in an int32 with room to spare.
+    bool has_station = false;
+    int32_t lat_e7   = 0;
+    int32_t lon_e7   = 0;
+    int32_t alt_mm   = 0;
 };
 
 // Read one line. On failure the returned command has err set and verb left as

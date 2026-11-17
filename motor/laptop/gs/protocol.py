@@ -22,8 +22,9 @@ The two directions, one line each, "\n" terminated:
     DEFAULTS,<id>                       GEAR,<id>,<ON|OFF>,<az_num>,...
     SETTINGS,<id>                       TRK,<id>,<ON|OFF>,<az_target>,...
     GEAR,<id>[,<ON|OFF>]                RX,<ON|OFF>,ok=<n>,bad=<n>,...
-    TRACK,<id>[,<ON|OFF|REPLAY>]
+    TRACK,<id>[,<ON|OFF|REPLAY>]        STATION,<id>,<from>,<lat_e7>,...
     TARGET,<id>,<az_mdeg>,<el_mdeg>
+    STATION,<id>[,<lat_e7>,<lon_e7>,<alt_mm>]
 
 A MOVE can also turn both axes at once, each at its own speed:
 `MOVE,<id>,AZ,<mdps>,<mdeg>,EL,<mdps>,<mdeg>`. It is answered with one ACK,
@@ -57,6 +58,17 @@ position to point from. A TARGET from here takes over from the radio, so a
 laptop source still works - it just has to keep sending. TRACK OFF also
 resets the radio's packet ordering, which is the only way a transmitter that
 restarted (its sequence back at 0) is heard again.
+
+STATION asks where the ground station is that the radio is pointed from, or
+moves it until the Pico restarts: latitude and longitude in ten-millionths
+of a degree, altitude in millimetres above the WGS84 ellipsoid. The reply
+says where the one in force came from - SET over USB, BUILTIN from
+radio_config.hpp, NONE, or REPLAY for a build whose radio plays the
+simulated flight, which refuses a new one with ERR fixed. It is refused as
+busy while tracking, so the antenna never jumps mid-flight. The window
+keeps its own copy on the laptop and sends it on every connect and every
+radio arm (see `station_file.py`), which is what makes a Pico restart
+harmless.
 
 RX is that receiver's once-a-second summary, unprompted and with no id.
 Every number in it is a total since the Pico started, or a worst case since
@@ -144,6 +156,22 @@ SETTING_NAMES = ("ACCEL", "MIN", "MAX", "DEADBAND")
 # only turn up in errors.
 AXIS_NAMES = ("AZ", "EL", "ALL", "NONE")
 
+# Where a STATION may be, from command_rules.hpp. Not the Pico's settings to
+# vary like the soft limits - these are where a place on Earth can be, plus
+# an altitude window that catches millimetres typed as metres - so they are
+# checked here before sending.
+STATION_LAT_MAX_DEG = 90.0
+STATION_LON_MAX_DEG = 180.0
+STATION_ALT_MIN_M = -1000.0
+STATION_ALT_MAX_M = 10000.0
+
+# The STATION reply's word for where the station in force came from.
+STATION_SET = "SET"
+STATION_BUILTIN = "BUILTIN"
+STATION_NONE = "NONE"
+STATION_REPLAY = "REPLAY"
+STATION_FROM = (STATION_SET, STATION_BUILTIN, STATION_NONE, STATION_REPLAY)
+
 # err_name() in replies.cpp, with what each one means to the operator.
 ERR_MEANING = {
     "syntax": "the Pico could not read that line",
@@ -161,10 +189,13 @@ ERR_MEANING = {
     "flash": "the Pico could not write its flash, so nothing was saved",
     "track": "tracking is not armed - send track on first",
     "replay": "this firmware has no replay station set in replay_config.hpp",
+    "fixed": "this build's radio plays the simulated flight, so it points "
+             "from replay_config.hpp's station and that cannot be changed - "
+             "set RADIO_POSITION_SOURCE to Gps and reflash for a real one",
     # Not from err_name(): main.cpp sends this one itself, before decide().
-    "station": "the ground station's position is not set in radio_config.hpp, "
-               "so the Pico cannot point at the rocket - set "
-               "RADIO_LIVE_STATION and reflash",
+    "station": "the Pico has no ground-station position to point the radio "
+               "from - set one in the track panel (choose the rocket, fill "
+               "in the station, press set station)",
 }
 
 # The radio's status code in an RX line - a RadioLib error number from
@@ -209,6 +240,22 @@ def deg_to_mdeg(deg: float) -> int:
 def mdeg_to_deg(mdeg: int) -> float:
     """Millidegrees back to degrees."""
     return mdeg / 1000.0
+
+
+def deg_to_e7(deg: float) -> int:
+    """Degrees of latitude or longitude into whole ten-millionths, for
+    STATION. About a centimetre on the ground. Rounds half away from zero,
+    like deg_to_mdeg."""
+    whole = int(abs(float(deg)) * 1e7 + 0.5)
+    return -whole if deg < 0 else whole
+
+
+def format_e7(e7: int) -> str:
+    """Ten-millionths of a degree as degrees: -803944878 -> "-80.3944878".
+    Built from the integer, like format_mdeg."""
+    sign = "-" if e7 < 0 else ""
+    whole, frac = divmod(abs(e7), 10_000_000)
+    return f"{sign}{whole}.{frac:07d}"
 
 
 def format_mdeg(mdeg: int) -> str:
@@ -494,6 +541,31 @@ def gear(cmd_id: int, on: bool | None = None) -> str:
     return f"GEAR,{cmd_id},{ON if on else OFF}"
 
 
+def station(cmd_id: int, lat_deg: float | None = None,
+            lon_deg: float | None = None, alt_m: float | None = None) -> str:
+    """Ask where the ground station is, or move it until the Pico restarts.
+
+    All three left out asks. Given, `alt_m` is metres above the WGS84
+    ellipsoid - the same reference the rocket's GPS altitude is turned
+    into - not above sea level. Refused as busy while tracking.
+    """
+    _check_id(cmd_id)
+    given = [v is not None for v in (lat_deg, lon_deg, alt_m)]
+    if not any(given):
+        return f"STATION,{cmd_id}"
+    if not all(given):
+        raise CommandError("a station needs latitude, longitude and altitude")
+    for value, what, lo, hi in (
+            (lat_deg, "latitude", -STATION_LAT_MAX_DEG, STATION_LAT_MAX_DEG),
+            (lon_deg, "longitude", -STATION_LON_MAX_DEG, STATION_LON_MAX_DEG),
+            (alt_m, "altitude", STATION_ALT_MIN_M, STATION_ALT_MAX_M)):
+        if not lo <= float(value) <= hi:  # also false for nan
+            raise CommandError(f"{what} must be {lo:g}..{hi:g}, got {value}")
+    # Millimetres are thousandths, so deg_to_mdeg's rounding does for metres.
+    return (f"STATION,{cmd_id},{deg_to_e7(lat_deg)},{deg_to_e7(lon_deg)},"
+            f"{deg_to_mdeg(alt_m)}")
+
+
 def encode(line: str) -> bytes:
     """A command line as the bytes to write to the port.
 
@@ -745,6 +817,59 @@ class Pong(Reply):
 
 
 @dataclass(frozen=True)
+class Station(Reply):
+    """The ground station the radio is pointed from, and where it came from.
+
+    `source` is one of STATION_FROM: SET (sent over USB since the Pico
+    started), BUILTIN (radio_config.hpp), NONE (nothing usable - radio
+    arming is refused, and the numbers are zeros) or REPLAY (a build whose
+    radio plays the simulated flight; it cannot be changed).
+    """
+
+    id: int
+    source: str
+    lat_e7: int
+    lon_e7: int
+    alt_mm: int
+
+    @property
+    def usable(self) -> bool:
+        return self.source != STATION_NONE
+
+    @property
+    def settable(self) -> bool:
+        return self.source != STATION_REPLAY
+
+    @property
+    def lat_deg(self) -> float:
+        return self.lat_e7 / 1e7
+
+    @property
+    def lon_deg(self) -> float:
+        return self.lon_e7 / 1e7
+
+    @property
+    def alt_m(self) -> float:
+        return self.alt_mm / 1000.0
+
+    def where(self) -> str:
+        """The position, the way it is shown everywhere."""
+        return (f"{format_e7(self.lat_e7)}, {format_e7(self.lon_e7)}, "
+                f"{format_mdeg(self.alt_mm)} m")
+
+    def describe(self) -> str:
+        """One line fit to print to the operator."""
+        if self.source == STATION_NONE:
+            return "none - the radio cannot be armed until one is set"
+        origin = {
+            STATION_SET: "set over USB",
+            STATION_BUILTIN: "built in, radio_config.hpp",
+            STATION_REPLAY: "the replay's, replay_config.hpp - fixed",
+        }.get(self.source, self.source)
+        return f"{self.where()} ({origin})"
+
+
+@dataclass(frozen=True)
 class Mstat(Reply):
     """The heartbeat. No id - this one is not a reply to anything.
 
@@ -884,7 +1009,7 @@ class Info(Reply):
 RECORD_NAMES = frozenset(
     {
         "ACK", "PLAN", "DONE", "POS", "PIN", "LIM", "CFG", "GEAR", "TRK",
-        "PONG", "MSTAT", "ERR", "RX",
+        "PONG", "MSTAT", "ERR", "RX", "STATION",
     }
 )
 
@@ -1050,6 +1175,17 @@ def parse_reply(line: str) -> Reply:
         if name == "PONG" and len(f) == 5:
             return Pong(
                 id=_int(f[1]), target=f[2], version=f[3], uptime_ms=_int(f[4])
+            )
+
+        if name == "STATION" and len(f) == 6:
+            if f[2] not in STATION_FROM:
+                raise ValueError(f"not a station source: {f[2]!r}")
+            return Station(
+                id=_int(f[1]),
+                source=f[2],
+                lat_e7=_int(f[3]),
+                lon_e7=_int(f[4]),
+                alt_mm=_int(f[5]),
             )
 
         if name == "MSTAT" and len(f) == 5:

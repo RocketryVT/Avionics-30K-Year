@@ -405,6 +405,26 @@ class Session:
         cmd_id = self.ids.next()
         return self.request(p.gear(cmd_id, on), cmd_id, (p.Gear,), "GEAR")
 
+    # --- the ground station ---------------------------------------------------
+
+    def station(self) -> p.Station:
+        """Where the Pico thinks the ground station is. Changes nothing."""
+        cmd_id = self.ids.next()
+        return self.request(p.station(cmd_id), cmd_id, (p.Station,),
+                            "STATION")
+
+    def set_station(self, lat_deg: float, lon_deg: float,
+                    alt_m: float) -> p.Station:
+        """Point the radio from here until the Pico restarts.
+
+        `alt_m` is above the WGS84 ellipsoid, not sea level. Returns the
+        station now in force. Refused as busy while tracking, and with ERR
+        fixed on a build whose radio plays the simulated flight.
+        """
+        cmd_id = self.ids.next()
+        line = p.station(cmd_id, lat_deg, lon_deg, alt_m)
+        return self.request(line, cmd_id, (p.Station,), "STATION")
+
     # --- moving -------------------------------------------------------------
 
     def begin_move(

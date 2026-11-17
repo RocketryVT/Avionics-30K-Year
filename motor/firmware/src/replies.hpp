@@ -17,7 +17,14 @@
 //       <el_target>,<el_pos>,<el_mdps>
 //   PONG,<id>,<target>,<version>,<uptime_ms>
 //   MSTAT,<uptime_s>,<az>,<el>,<IDLE|MOVING>
+//   STATION,<id>,<SET|BUILTIN|NONE|REPLAY>,<lat_e7>,<lon_e7>,<alt_mm>
 //   ERR,<id>,<code>,<detail>
+//
+// STATION answers both the question and the change with the ground station
+// the radio is pointed from, and where that came from: SET over USB since
+// the last restart, BUILTIN from radio_config.hpp, NONE (zeros, and radio
+// arming is refused), or REPLAY - a build whose radio plays the simulated
+// flight, pointed from replay_config.hpp's station, which cannot be set.
 //
 // LIM and CFG are each one line; they are only split here to fit. The speed
 // ceiling is per axis because geared mode scales it with that axis's own
@@ -78,6 +85,8 @@ enum class ErrCode {
     Flash,      // SAVE could not write the settings to flash
     NotTracking, // a TARGET arrived with tracking not armed
     NoReplay,    // TRACK REPLAY, but the replay has no station position set
+    StationFixed, // STATION with a position, on a build whose radio station
+                  // is the replay's and cannot be moved
 };
 
 // The words used on the wire for each of these.
@@ -131,6 +140,26 @@ size_t format_trk(char *buf, size_t n, uint16_t id, const TrackReport &r);
 
 size_t format_pong(char *buf, size_t n, uint16_t id, const char *target,
                    const char *version, uint32_t uptime_ms);
+
+// Where the ground station the radio is pointed from came from.
+enum class StationFrom {
+    None,     // nowhere: radio arming is refused
+    BuiltIn,  // RADIO_LIVE_STATION in radio_config.hpp, as flashed
+    Set,      // sent over USB since the Pico started
+    Replay,   // a replay build's REPLAY_STATION, which cannot be changed
+};
+
+// The ground station, as whole numbers for the wire: ten-millionths of a
+// degree, and millimetres above the WGS84 ellipsoid. All zero for None.
+struct StationReport {
+    StationFrom from;
+    int32_t lat_e7;
+    int32_t lon_e7;
+    int32_t alt_mm;
+};
+
+size_t format_station(char *buf, size_t n, uint16_t id,
+                      const StationReport &r);
 
 size_t format_mstat(char *buf, size_t n, uint32_t uptime_s, int32_t az_mdeg,
                     int32_t el_mdeg, bool moving);

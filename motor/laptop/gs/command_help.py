@@ -128,6 +128,19 @@ ENTRIES = [
              "up by itself. After the transmitter restarts, 'track off' "
              "before 'track on', or its packets are thrown away as old.",
     ),
+    Entry(
+        command="station",
+        usage="station [<lat> <lon> <alt>]",
+        what="Where the ground station is that the radio is pointed from. "
+             "With a position it moves it, until the Pico restarts: decimal "
+             "degrees, and metres above the WGS84 ellipsoid - sea-level "
+             "height plus the geoid separation, about -33 m around "
+             "Blacksburg.",
+        when="Rarely by hand: the track panel's station row (choose the "
+             "rocket) keeps it on this laptop and sends it on every connect "
+             "and every arm, so it overrides one typed here. Ask with no "
+             "position to check what the Pico is really using.",
+    ),
 
     # --- tuning ------------------------------------------------------------
     Entry(

@@ -47,7 +47,10 @@ ground Pico receives over the radio and turns into pointing on its own.
 For that one the window shows the radio link on a line of the connection
 panel (from the Pico's once-a-second RX line, see `radio.py`), and when the
 Pico's watchdog drops a radio session it offers a one-click re-arm, because
-the Pico never re-arms by itself.
+the Pico never re-arms by itself. It also shows the ground station the
+radio is pointed from, in the rows the direction boxes free: typed in once,
+kept on the laptop (`station_file.py`), and sent to the Pico on every
+connect and every arm, so moving the station needs no reflash.
 
 Keeping it geared is `_keep_geared`'s job. A gear change costs both axes
 their zero, because the drive train is physically different. So whenever
@@ -116,6 +119,7 @@ Four rules it holds to
 from __future__ import annotations
 
 import argparse
+import os
 import queue
 import sys
 import time
@@ -131,6 +135,7 @@ from gs import protocol as p
 from gs import radio
 from gs import results_file
 from gs import startup_guide
+from gs import station_file
 
 # How often the Tk thread looks for events from the worker. Well under the
 # worker's own poll interval, so a fresh reading is shown as soon as it
@@ -155,6 +160,9 @@ HISTORY = 50
 
 # Said beside the move buttons whenever no move is running.
 MOVE_HINT = "a blank angle keeps that axis still"
+
+# Said under the "log to CSV" box while nothing is being logged.
+CSV_HINT = "tick before arming: a row every 0.1 s while tracking"
 
 # The tracking sources the Pico steers itself, so the laptop sends no targets
 # and the targets/sec box does not apply.
@@ -197,6 +205,13 @@ LINK_COLOUR = {
     radio.LEVEL_WARN: WARN,
     radio.LEVEL_BAD: BAD,
 }
+
+
+def _plain(value: float) -> str:
+    """A station number the way somebody would type it: no exponent, no
+    trailing zeros. Seven places is the most the wire keeps."""
+    text = f"{value:.7f}".rstrip("0").rstrip(".")
+    return "0" if text in ("", "-0") else text
 
 
 def _uptime(ms: int) -> str:
@@ -242,6 +257,13 @@ class App:
         # so one gear-off reading sends one GEAR, not one per poll while the
         # job waits its turn. See _keep_geared.
         self._gear_sent = False
+
+        # The CSV the worker last reported, and the last trouble with one, so
+        # the "log to CSV" box follows the worker only when either changes.
+        # Set from every state, it would untick itself in the moment between
+        # a click and the worker opening the file.
+        self._csv_seen = ""
+        self._csv_error_seen = ""
 
         root.title(WINDOW_TITLE)
         # The smallest it can be dragged to, not the size it opens at - that
@@ -561,6 +583,8 @@ class App:
         tracking, with the move row above for putting the antenna where it
         needs to be first."""
         track = self._frame(row, "track")
+        # Only the station's status line stretches: the rest sit at the left.
+        track.columnconfigure(3, weight=1)
 
         picker = ttk.Frame(track)
         picker.grid(row=0, column=0, columnspan=4, sticky="w")
@@ -613,8 +637,36 @@ class App:
         self.m3_span = self._entry(moving, 0, 5, "30", width=5)
         ttk.Label(moving, text="deg").grid(row=0, column=6, padx=2)
 
+        # Where the radio is pointed from, for the rocket alone. In the two
+        # rows the direction boxes free, so it costs no height. Kept on the
+        # laptop and sent to the Pico on every connect and every arm - see
+        # station_file.py - so moving it needs no reflash.
+        station = ttk.Frame(track)
+        station.grid(row=3, column=0, columnspan=4, sticky="ew")
+        station.columnconfigure(9, weight=1)
+        self.m3_station_row = station
+        ttk.Label(station, text="station  lat").grid(row=0, column=0,
+                                                       **PAD)
+        self.e_lat = self._entry(station, 0, 1, width=12)
+        ttk.Label(station, text="lon").grid(row=0, column=2, padx=2)
+        self.e_lon = self._entry(station, 0, 3, width=12)
+        ttk.Label(station, text="MSL").grid(row=0, column=4, padx=(10, 2))
+        self.e_msl = self._entry(station, 0, 5, width=8)
+        ttk.Label(station, text="m  geoid").grid(row=0, column=6, padx=2)
+        self.e_geoid = self._entry(station, 0, 7, width=8)
+        ttk.Label(station, text="m").grid(row=0, column=8, padx=2)
+        self.b_station = ttk.Button(station, text="set station", width=11,
+                                    command=self._set_station)
+        self.b_station.grid(row=0, column=9, sticky="w", padx=(12, 2))
+        # What the Pico is actually using, which is what arming points
+        # from. width=1 so a long line is cut at the right rather than
+        # widening the window - see the radio line.
+        self.v_station = ttk.Label(station, text="", width=1)
+        self.v_station.grid(row=1, column=0, columnspan=10, sticky="ew",
+                            **PAD)
+
         arm = ttk.Frame(track)
-        arm.grid(row=3, column=0, columnspan=4, sticky="w")
+        arm.grid(row=4, column=0, columnspan=4, sticky="w")
         self.b_arm = ttk.Button(arm, text="ARM tracking", width=14,
                                 style="Arm.TButton", command=self._arm)
         self.b_arm.grid(row=0, column=0, **PAD)
@@ -629,10 +681,13 @@ class App:
         self.b_rearm.grid(row=0, column=2, **PAD)
         self.v_arm_note = self._value(arm, 0, 3, "")
 
+        readout = ttk.Frame(track)
+        readout.grid(row=5, column=0, columnspan=4, sticky="w", pady=(4, 0))
+
         # The readout. Three numbers per axis, because the interesting thing
         # while tracking is not where it is but how far behind it is.
-        board = ttk.Frame(track)
-        board.grid(row=4, column=0, columnspan=4, sticky="w", pady=(4, 0))
+        board = ttk.Frame(readout)
+        board.grid(row=0, column=0, sticky="nw")
         for col, head in enumerate(("", "target", "actual", "off by",
                                     "turning at")):
             self._value(board, 0, col, head, font=self.bold)
@@ -641,6 +696,19 @@ class App:
             self._value(board, line, 0, axis, font=self.bold)
             self.v_trk[axis] = [self._value(board, line, col)
                                 for col in (1, 2, 3, 4)]
+
+        # The same numbers, kept: a CSV row for every report the Pico sends
+        # while tracking - see flight_log.py for the columns. Beside the
+        # readout because that is what it records, and so it costs no height.
+        record = ttk.Frame(readout)
+        record.grid(row=0, column=1, sticky="nw", padx=(36, 0))
+        self.v_csv_on = tk.BooleanVar(value=False)
+        self.c_csv = ttk.Checkbutton(record, text="log to CSV",
+                                     variable=self.v_csv_on,
+                                     command=self._csv_toggled)
+        self.c_csv.grid(row=0, column=0, sticky="w", **PAD)
+        self.v_csv = ttk.Label(record, text=CSV_HINT, style="Hint.TLabel")
+        self.v_csv.grid(row=1, column=0, sticky="w", **PAD)
 
     def _build_log_and_commands(self, row: int) -> None:
         log = ttk.LabelFrame(self.root, text="conversation")
@@ -1003,6 +1071,33 @@ class App:
 
     # --- tracking ----------------------------------------------------------
 
+    def _csv_toggled(self) -> None:
+        # Needs no Pico: the file is opened now and filled once tracking is.
+        # Forgetting the last error makes the same error twice in a row
+        # still untick the box.
+        self._csv_error_seen = ""
+        self.worker.log_csv(self.v_csv_on.get())
+
+    def _show_csv(self, st: gw.State) -> None:
+        if st.csv_path != self._csv_seen:
+            self._csv_seen = st.csv_path
+            self.v_csv_on.set(bool(st.csv_path))
+        if st.csv_error != self._csv_error_seen:
+            self._csv_error_seen = st.csv_error
+            if st.csv_error:
+                self.v_csv_on.set(False)
+        if st.csv_path:
+            name = os.path.join(os.path.basename(os.path.dirname(
+                st.csv_path)), os.path.basename(st.csv_path))
+            self.v_csv.configure(text=f"{name}   {st.csv_rows} rows",
+                                 foreground=INK)
+        elif st.csv_error:
+            self.v_csv.configure(
+                text=f"NOT LOGGING - {st.csv_error}, see the conversation",
+                foreground=BAD)
+        else:
+            self.v_csv.configure(text=CSV_HINT, foreground=MUTED)
+
     def _source_chosen(self) -> None:
         # Changing the source mid-flight would mean two of them fighting, so
         # it only takes effect next time tracking is armed.
@@ -1012,18 +1107,108 @@ class App:
         self._refresh_enabled(self._state)
 
     def _show_source_rows(self) -> None:
-        """Hide the direction rows when the Pico steers itself.
+        """Show only the rows the chosen source uses.
 
-        They do nothing for the radio or the built-in flight, and the window
-        is short of height - the rows they free are what pay for the radio
-        line up in the connection panel. Hidden rather than only disabled.
+        The direction rows do nothing for the radio or the built-in flight,
+        and the station rows do nothing for anything but the radio. The
+        window is short of height - the rows hidden are what pay for the
+        radio line up in the connection panel, and for the station. Hidden
+        rather than only disabled.
         """
-        pico = self.m3_source.get() in PICO_SOURCES
+        kind = self.m3_source.get()
+        pico = kind in PICO_SOURCES
         for row in (self.m3_aim_row, self.m3_moving_row):
             if pico:
                 row.grid_remove()
             else:
                 row.grid()
+        if kind == "radio":
+            self.m3_station_row.grid()
+        else:
+            self.m3_station_row.grid_remove()
+
+    def _set_station(self) -> None:
+        """Keep the station in the boxes, and send it to the Pico.
+
+        Needs no Pico: it is saved on the laptop and goes to the Pico when
+        one connects. A "lat, lon" pair pasted into the first box is split
+        into both.
+        """
+        try:
+            saved = station_file.parse(self.e_lat.get(), self.e_lon.get(),
+                                       self.e_msl.get(), self.e_geoid.get())
+        except ValueError as exc:
+            self.note(f"station not set: {exc}")
+            return
+        if self._state.tracking:
+            # The button is closed while tracking; this is the backstop.
+            self.note("the station cannot change while tracking - disarm "
+                      "first")
+            return
+        # Show exactly what is kept, rounded to the centimetre the wire
+        # carries, and split if a pair was pasted.
+        for entry, value in ((self.e_lat, saved.lat_deg),
+                             (self.e_lon, saved.lon_deg),
+                             (self.e_msl, saved.msl_m),
+                             (self.e_geoid, saved.geoid_m)):
+            entry.delete(0, "end")
+            entry.insert(0, _plain(value))
+        self.worker.set_station(saved)
+
+    def _show_station(self, st: gw.State) -> None:
+        """The station boxes, and what the Pico is really pointing from."""
+        saved = st.station_saved
+        if saved is not None:
+            for entry, value in ((self.e_lat, saved.lat_deg),
+                                 (self.e_lon, saved.lon_deg),
+                                 (self.e_msl, saved.msl_m),
+                                 (self.e_geoid, saved.geoid_m)):
+                self._fill(entry, _plain(value))
+        text, colour = self._station_line(st)
+        self.v_station.configure(text=text, foreground=colour)
+
+    @staticmethod
+    def _station_line(st: gw.State) -> tuple[str, str]:
+        """What the line under the station boxes says, and in what colour.
+
+        Green only when the Pico is pointing from the station saved here -
+        the one arming sends. Anything else is said in amber or red, because
+        the station is the one number in tracking nobody sees go wrong: the
+        antenna chases a wrong one perfectly smoothly.
+        """
+        saved = st.station_saved
+        station = st.station
+        if not st.connected:
+            if saved is None:
+                return ("type the ground station and press set station. "
+                        "MSL + geoid = the height the Pico points from",
+                        MUTED)
+            return (f"saved: {saved.where()} above the ellipsoid - sent "
+                    "when the Pico connects", MUTED)
+        if st.station_unsupported:
+            return ("this firmware cannot take a station - it points from "
+                    "radio_config.hpp's. Reflash the ground Pico.", BAD)
+        if station is None:
+            return ("Pico using: -", MUTED)
+        if not station.settable:
+            return ("Pico using " + station.where() + " - this build's radio "
+                    "plays the replay, so its station is fixed", INK)
+        if saved is not None and saved.matches(station):
+            return ("Pico using " + station.where() + " above the ellipsoid "
+                    "- this one, saved on this laptop", GOOD)
+        if not station.usable:
+            if saved is None:
+                return ("the Pico has NO station - radio arming is refused "
+                        "until one is set", BAD)
+            return ("the Pico has no station yet - arming sends the saved "
+                    "one", WARN)
+        origin = ("radio_config.hpp's" if station.source == p.STATION_BUILTIN
+                  else "set over USB")
+        if saved is None:
+            return (f"Pico using {station.where()} ({origin}) - set one "
+                    "above to change it", WARN)
+        return (f"Pico using {station.where()} ({origin}), NOT the saved one "
+                "- arming sends the saved one", WARN)
 
     def _arm(self) -> None:
         if self._offline():
@@ -1073,12 +1258,14 @@ class App:
                 "STOP, E-STOP and disarm stay live. When the flight ends the "
                 "Pico stops tracking by itself.")
         elif kind == "radio":
+            station = self._arming_station()
+            if station is None:
+                return
             message = (
                 "The motors will start moving on their own, pointing at each "
                 "rocket position the Pico receives over the radio. Nothing "
-                "is sent from the laptop. The Pico points from the ground "
-                "station position built into its firmware "
-                "(radio_config.hpp).\n\n"
+                "is sent from the laptop.\n\n"
+                f"{station}\n\n"
                 f"If no usable position arrives for {p.TRACK_TIMEOUT_S} s - "
                 f"including in the first {p.TRACK_TIMEOUT_S} s after arming "
                 "- the Pico stops tracking by itself, and 're-arm radio' "
@@ -1112,6 +1299,36 @@ class App:
         if not self.confirm("Arm tracking?", message):
             return
         self.worker.start_tracking(kind, hz, az, el, *motion)
+
+    def _arming_station(self) -> str | None:
+        """What the arm dialog says about the station, or None - having
+        said why - when arming would only be refused for the want of one.
+
+        Spelled out in the dialog because it is the last look anybody gets
+        at it, and a wrong one fails silently: the antenna follows it
+        perfectly smoothly, just pointing at the wrong patch of sky.
+        """
+        st = self._state
+        saved = st.station_saved
+        station = st.station
+        fixed = station is not None and not station.settable
+        if saved is not None and not st.station_unsupported and not fixed:
+            return ("The Pico points from the ground station saved in this "
+                    f"window, which arming sends it:\n{saved.where()} above "
+                    f"the ellipsoid\n(MSL {_plain(saved.msl_m)} m, geoid "
+                    f"{_plain(saved.geoid_m)} m)")
+        if station is None:
+            return ("The Pico points from the ground station it already "
+                    "has - not known here yet.")
+        if not station.usable:
+            self.note("set the ground station first: the Pico has none, so "
+                      "it would refuse to arm the radio")
+            return None
+        warning = ("WARNING - this firmware cannot take the window's "
+                   "station, so the Pico keeps its own.\n"
+                   if st.station_unsupported and saved is not None else "")
+        return (f"{warning}The Pico points from the ground station "
+                f"{station.describe()}.")
 
     def _disarm(self) -> None:
         self.worker.stop_tracking()
@@ -1395,6 +1612,8 @@ class App:
         self.v_uptime.configure(text=f"up {_uptime(st.uptime_ms)}")
         self._show_heartbeat(st)
         self._show_radio(st)
+        self._show_csv(st)
+        self._show_station(st)
 
         # Nothing to say while geared, which is the only way this window
         # runs. Gear off changes what every angle on screen means, so it is
@@ -1522,6 +1741,10 @@ class App:
         for widget in (self.b_zero_all, self.b_zero_az, self.b_zero_el,
                        self.b_apply, self.b_save, self.b_defaults):
             widget.state(["!disabled"] if usable else ["disabled"])
+        # The Pico refuses a new station while tracking: it would move every
+        # target mid-flight. The boxes stay editable, for the next one.
+        self.b_station.state(["!disabled"] if usable and not st.tracking
+                             else ["disabled"])
 
         # `settled` is false while tracking, so a manual move cannot be
         # thrown in while the Pico is chasing a target.

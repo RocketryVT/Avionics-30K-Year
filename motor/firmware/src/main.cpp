@@ -113,9 +113,18 @@ static uint16_t g_replay_command_id = 1;
 static constexpr bool REPLAY_READY =
     REPLAY_STATION.has_value() && REPLAY_GEOID_SEPARATION_M.has_value();
 
+static constexpr bool RADIO_PLAYS_REPLAY =
+    RADIO_POSITION_SOURCE == RadioPositionSource::Replay;
+
 static constexpr std::optional<GPSPosition> RADIO_STATION =
-    RADIO_POSITION_SOURCE == RadioPositionSource::Replay
-        ? REPLAY_STATION : RADIO_LIVE_STATION;
+    RADIO_PLAYS_REPLAY ? REPLAY_STATION : RADIO_LIVE_STATION;
+
+// The ground station the radio is pointed from. It starts as the one built
+// in above, and STATION replaces it until the next restart - the laptop's
+// window sends its own on every connect and every radio arm, so the station
+// moves without a reflash. Never changed on a replay build: see do_station.
+static std::optional<GPSPosition> g_station = RADIO_STATION;
+static bool g_station_set = false;
 
 // Radio ownership is separate from arming and the local replay state.
 static bool g_radio_targets = false;
@@ -170,6 +179,45 @@ static void send_if_room(size_t n)
 }
 
 // ----------------------------------------------------------------------------
+// The ground station
+// ----------------------------------------------------------------------------
+
+static bool radioStationReady()
+{
+    if (!g_station)
+        return false;
+
+    const auto &s = *g_station;
+    return std::isfinite(s.latitude) && s.latitude >= -90.0 &&
+           s.latitude <= 90.0 && std::isfinite(s.longitude) &&
+           s.longitude >= -180.0 && s.longitude <= 180.0 &&
+           std::isfinite(s.altitude);
+}
+
+// The station as the wire carries it. A position that would not do - none,
+// or not a place on Earth - is reported as zeros, which with NONE is what
+// it is: radio arming is refused until one is set.
+static StationReport station_report()
+{
+    StationReport r{StationFrom::None, 0, 0, 0};
+    if (RADIO_PLAYS_REPLAY)
+        r.from = StationFrom::Replay;
+    if (!radioStationReady())
+        return r;
+
+    if (!RADIO_PLAYS_REPLAY)
+        r.from = g_station_set ? StationFrom::Set : StationFrom::BuiltIn;
+    r.lat_e7 = static_cast<int32_t>(std::llround(g_station->latitude * 1e7));
+    r.lon_e7 = static_cast<int32_t>(std::llround(g_station->longitude * 1e7));
+    // Bounded so a built-in altitude typed in millimetres cannot overflow
+    // the report; anything this far out is refused by do_station anyway.
+    const double alt_mm = std::fmax(-2e9, std::fmin(2e9,
+                                    g_station->altitude * 1000.0));
+    r.alt_mm = static_cast<int32_t>(std::llround(alt_mm));
+    return r;
+}
+
+// ----------------------------------------------------------------------------
 // Startup
 // ----------------------------------------------------------------------------
 
@@ -201,6 +249,18 @@ static void print_mdeg(int32_t mdeg)
     {
         printf("%ld.%03ld", whole, frac);
     }
+}
+
+// Ten-millionths of a degree as degrees with seven decimals, for the banner.
+static void print_e7(int32_t e7)
+{
+    const long whole = e7 / 10000000;
+    long frac = e7 % 10000000;
+    if (frac < 0)
+    {
+        frac = -frac;
+    }
+    printf("%s%ld.%07ld", (e7 < 0 && whole == 0) ? "-" : "", whole, frac);
 }
 
 static void print_steps_per_deg(const AxisSpec &axis)
@@ -311,6 +371,27 @@ static void print_banner(LoadResult loaded)
         printf("[motor] replay: no station set in replay_config.hpp - TRACK REPLAY refused\n");
     }
 
+    // The station the radio is pointed from. Built in at startup; the
+    // laptop's window replaces it as soon as it connects, if it has one.
+    const StationReport st = station_report();
+    if (st.from == StationFrom::None)
+    {
+        printf("[motor] station: none - radio arming refused until STATION sets one\n");
+    }
+    else
+    {
+        printf("[motor] station ");
+        print_e7(st.lat_e7);
+        printf(" ");
+        print_e7(st.lon_e7);
+        printf(" ");
+        print_mdeg(st.alt_mm);
+        printf(" m (%s)\n",
+               st.from == StationFrom::Replay
+                   ? "replay_config.hpp - this build's radio plays the replay"
+                   : "radio_config.hpp - STATION replaces it");
+    }
+
     printf("[motor] NOT ZEROED - send ZERO before any MOVE\n");
 }
 
@@ -344,6 +425,7 @@ static MachineState snapshot()
     s.settings_unsaved = g_gear != g_boot_gear ||
                          !same_settings(g_az_spec, g_boot_az) ||
                          !same_settings(g_el_spec, g_boot_el);
+    s.station = station_report();
     s.uptime_ms = to_ms_since_boot(get_absolute_time());
     s.target = GS_TARGET_NAME;
     s.version = GS_VERSION;
@@ -472,6 +554,12 @@ static void apply(const Decision &d)
         g_az.disarm_chase();
         g_el.disarm_chase();
         break;
+    case Act::SetStation:
+        g_station = GPSPosition{d.station.lat_e7 / 1e7,
+                                d.station.lon_e7 / 1e7,
+                                d.station.alt_mm / 1000.0};
+        g_station_set = true;
+        break;
     }
 
     // An axis stops knowing where it is when a step goes out uncounted (a
@@ -486,18 +574,6 @@ static void apply(const Decision &d)
     {
         g_el.clear_zero();
     }
-}
-
-static bool radioStationReady()
-{
-    if (!RADIO_STATION)
-        return false;
-
-    const auto &s = *RADIO_STATION;
-    return std::isfinite(s.latitude) && s.latitude >= -90.0 &&
-           s.latitude <= 90.0 && std::isfinite(s.longitude) &&
-           s.longitude >= -180.0 && s.longitude <= 180.0 &&
-           std::isfinite(s.altitude);
 }
 
 // Compare transmitter counters only; the two Pico clocks are not synchronized.
@@ -651,10 +727,10 @@ static void pollRadioTarget(absolute_time_t now)
         absolute_time_diff_us(received.received_at, now);
 
     if (!g_tracking || !g_radio_targets || g_replay_on ||
-        !RADIO_STATION || wait_us < 0 || wait_us > 500'000)
+        !g_station || wait_us < 0 || wait_us > 500'000)
         return;
 
-    if (submitRocketPosition(received.position, *RADIO_STATION,
+    if (submitRocketPosition(received.position, *g_station,
                              g_radio_command_id++))
         ++g_radio_target_count;
 }
