@@ -484,6 +484,48 @@ Decision do_target(const Command &c, const MachineState &s)
     return d;
 }
 
+// ---------------------------------------------------------------------------
+// STATION
+// ---------------------------------------------------------------------------
+
+Decision do_station(const Command &c, const MachineState &s)
+{
+    Decision d;
+    if (!c.has_station) {
+        say(d, format_station(line_buf(d), MAX_REPLY_LEN, c.id, s.station));
+        return d;
+    }
+
+    // A replay build's radio carries the simulated flight, whose geometry
+    // is only right from replay_config.hpp's station. A real one here
+    // would point at Florida from wherever this is.
+    if (s.station.from == StationFrom::Replay) {
+        return refuse(c, ErrCode::StationFixed, "");
+    }
+
+    // Moving the station moves every target the radio makes, so it waits
+    // for tracking to be off, like a gear change. A backstop: tracking
+    // keeps the axes busy, and busy refuses this before it gets here.
+    if (s.tracking) {
+        return refuse(c, ErrCode::Busy, "tracking");
+    }
+
+    if (c.lat_e7 < -STATION_LAT_MAX_E7 || c.lat_e7 > STATION_LAT_MAX_E7) {
+        return refuse(c, ErrCode::Range, "lat");
+    }
+    if (c.lon_e7 < -STATION_LON_MAX_E7 || c.lon_e7 > STATION_LON_MAX_E7) {
+        return refuse(c, ErrCode::Range, "lon");
+    }
+    if (c.alt_mm < STATION_ALT_MIN_MM || c.alt_mm > STATION_ALT_MAX_MM) {
+        return refuse(c, ErrCode::Range, "alt");
+    }
+
+    d.act     = Act::SetStation;
+    d.station = StationReport{StationFrom::Set, c.lat_e7, c.lon_e7, c.alt_mm};
+    say(d, format_station(line_buf(d), MAX_REPLY_LEN, c.id, d.station));
+    return d;
+}
+
 // What a line the parser could not read is refused with.
 ErrCode err_for(ParseError e)
 {
@@ -532,6 +574,7 @@ Decision decide(const Command &c, const MachineState &s)
     case Verb::Gear:     return do_gear(c, s);
     case Verb::Track:    return do_track(c, s);
     case Verb::Target:   return do_target(c, s);
+    case Verb::Station:  return do_station(c, s);
     case Verb::None:     break;
     }
     return Decision{};

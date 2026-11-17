@@ -23,6 +23,11 @@ venv/
 /motor/*.csv
 logs/
 
+# The ground station the window keeps (gs/station_file.py). It belongs to a
+# launch site, not to the code.
+/motor/laptop/station.json
+/motor/laptop/station.json.tmp
+
 # Editors and OS clutter
 .vscode/
 .idea/

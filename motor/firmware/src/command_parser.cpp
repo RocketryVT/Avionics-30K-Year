@@ -253,6 +253,9 @@ Command parse_command(const char *line)
     } else if (is_word(f[0], "TARGET")) {
         verb        = Verb::Target;
         want_fields = 4;
+    } else if (is_word(f[0], "STATION")) {
+        verb        = Verb::Station;
+        want_fields = 2;  // or 5 with a position, handled below
     } else {
         return fail(ParseError::UnknownVerb);
     }
@@ -262,8 +265,9 @@ Command parse_command(const char *line)
         ((verb == Verb::Move || verb == Verb::MoveTo) && n == 8);
     const bool gear_with_mode = (verb == Verb::Gear && n == 3);
     const bool track_with_mode = (verb == Verb::Track && n == 3);
+    const bool station_with_position = (verb == Verb::Station && n == 5);
     if (n != want_fields && !zero_with_angle && !move_both &&
-        !gear_with_mode && !track_with_mode) {
+        !gear_with_mode && !track_with_mode && !station_with_position) {
         return fail(ParseError::Syntax);
     }
 
@@ -375,6 +379,27 @@ Command parse_command(const char *line)
         }
         c.az_mdeg = static_cast<int32_t>(az);
         c.el_mdeg = static_cast<int32_t>(el);
+        break;
+    }
+
+    case Verb::Station: {
+        if (station_with_position) {
+            // Only a guard that each fits an int32. Whether it is a place
+            // on Earth is decided later, so an out-of-range latitude is
+            // refused as range rather than as a garbled line.
+            int64_t lat = 0;
+            int64_t lon = 0;
+            int64_t alt = 0;
+            if (!parse_int(f[2], -2000000000, 2000000000, &lat) ||
+                !parse_int(f[3], -2000000000, 2000000000, &lon) ||
+                !parse_int(f[4], -2000000000, 2000000000, &alt)) {
+                return fail(ParseError::Syntax, c.id);
+            }
+            c.lat_e7      = static_cast<int32_t>(lat);
+            c.lon_e7      = static_cast<int32_t>(lon);
+            c.alt_mm      = static_cast<int32_t>(alt);
+            c.has_station = true;
+        }
         break;
     }
 

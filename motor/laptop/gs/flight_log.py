@@ -24,6 +24,20 @@ quietly show a lie.
 
 `armed` is on every row because the Pico's watchdog can drop out of tracking
 on its own, and the row where that happens is the one worth finding.
+
+Following the rocket over the radio, there is no source on this side: the
+ground Pico works the direction out from each position it receives. So
+source_* stays blank, and target_* is that direction - the angle the Pico
+got from the rocket's GPS. The radio columns come from its once-a-second RX
+report, so they move in steps:
+
+    rx_seq       the rocket's sequence number on the last packet heard
+    rx_heard     packets heard since the Pico started
+    rx_rejected  packets thrown away - garbled, or out of order
+    rx_targets   positions that became a target
+
+The window writes a row for each TRK report (ten a second while tracking),
+plus a row with a `note` when tracking is armed or stops.
 """
 
 from __future__ import annotations
@@ -56,6 +70,10 @@ COLUMNS = [
     "rate_az",
     "rate_el",
     "fix_age_s",
+    "rx_seq",
+    "rx_heard",
+    "rx_rejected",
+    "rx_targets",
     "note",
 ]
 
@@ -107,8 +125,9 @@ class FlightLog:
         return self._rows
 
     def add(self, t_s: float, fix, trk: p.Trk | None,
-            note: str = "") -> None:
-        """One row. `fix` is a targets.Fix or None, `trk` the last report.
+            note: str = "", rx: p.Rx | None = None) -> None:
+        """One row. `fix` is a targets.Fix or None, `trk` the last report,
+        `rx` the ground Pico's last radio report if there is one.
 
         Flushed every time. A flight is a minute or two and the interesting
         rows are the ones just before something went wrong, which is exactly
@@ -143,6 +162,14 @@ class FlightLog:
                 "error_el": p.format_mdeg(trk.el_error_mdeg),
                 "rate_az": p.format_mdeg(trk.az_mdps),
                 "rate_el": p.format_mdeg(trk.el_mdps),
+            })
+
+        if rx is not None:
+            row.update({
+                "rx_seq": str(rx.seq),
+                "rx_heard": str(rx.ok),
+                "rx_rejected": str(rx.bad),
+                "rx_targets": str(rx.targets),
             })
 
         self._writer.writerow(row)

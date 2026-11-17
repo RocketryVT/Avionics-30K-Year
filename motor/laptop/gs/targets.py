@@ -2,7 +2,7 @@ r"""Where a pointing direction comes from.
 
 The tracking loop needs one thing: *where should the antenna point, now?*
 This module is the boundary between that question and whatever answers it,
-with four answers available and one interface over them.
+with several answers available and one interface over them.
 
     ManualSource   a direction you type. Nothing else involved, so it is how
                    the chase loop gets proved on the bench.
@@ -12,9 +12,15 @@ with four answers available and one interface over them.
     SimSource      a rehearsal: a synthetic flight, or a recorded one
                    replayed from CSV. Takes its clock as a parameter, so a
                    two-minute flight can be run through in a test instantly.
-    LiveSource     where the LoRa chain plugs in. Not written yet - it waits
-                   on the module that turns a rocket's lat/lon/alt into an
-                   az/el, which is somebody else's work.
+    LiveSource     a direction worked out on the laptop from live data:
+                   hand it a callable. The radio no longer needs it - see
+                   RadioSource - but it stays for anything that does.
+
+And two that hand over nothing, because the Pico steers itself:
+
+    PicoReplaySource  the simulated flight built into its firmware.
+    RadioSource       the rocket's GPS, received by the ground Pico over the
+                      radio, turned into pointing on the Pico itself.
 
 What a source hands over
 ------------------------
@@ -73,9 +79,14 @@ class TargetSource:
 
     name = "source"
 
-    # True for the one source whose directions come from the Pico itself
-    # rather than from here - see PicoReplaySource. It changes how tracking
-    # is armed (TRACK REPLAY instead of TRACK ON), and nothing else.
+    # True when the Pico works out its own targets and nothing is sent from
+    # here - the flight built into its firmware, or positions it receives
+    # over the radio. The loop then never sends a TARGET: one from the
+    # laptop would take over from whatever the Pico was following.
+    pico_steers = False
+
+    # True for the built-in flight alone - see PicoReplaySource. It changes
+    # how tracking is armed (TRACK REPLAY instead of TRACK ON).
     pico_replay = False
 
     def latest(self, now: float) -> Fix | None:
@@ -296,7 +307,30 @@ class PicoReplaySource(TargetSource):
     """
 
     name = "the Pico's built-in flight"
+    pico_steers = True
     pico_replay = True
+
+    def latest(self, now: float) -> Fix | None:
+        return None
+
+
+class RadioSource(TargetSource):
+    """The rocket's own GPS, received by the ground Pico over the radio.
+
+    Like PicoReplaySource, not a source of directions from this side. Arming
+    with it sends TRACK ON, which on firmware with the receiver built in
+    means "follow the radio": the ground Pico decodes each position, works
+    out the pointing from the station position built into it, and sets the
+    target itself. So `latest` never has anything and the loop only reads
+    the TRK stream back. A target sent from here would take over from the
+    radio, which is the other reason this one must never return a Fix.
+
+    The packet ordering on the Pico is reset by TRACK OFF, so the worker
+    sends one before arming with this source - see MotorWorker._arm_radio.
+    """
+
+    name = "the rocket, over the radio"
+    pico_steers = True
 
     def latest(self, now: float) -> Fix | None:
         return None

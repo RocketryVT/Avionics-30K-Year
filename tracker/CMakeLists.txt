@@ -52,6 +52,18 @@ target_include_directories(gps_parser PUBLIC
 )
 
 # ---------------------------------------------------------------------------
+# Position packet library
+# ---------------------------------------------------------------------------
+
+add_library(position_packet
+    src/position_packet.cpp
+)
+
+target_include_directories(position_packet PUBLIC
+    "${CMAKE_CURRENT_SOURCE_DIR}/include"
+)
+
+# ---------------------------------------------------------------------------
 # Desktop build switch
 # The Pico build turns this OFF; the libraries above remain available.
 # ---------------------------------------------------------------------------
@@ -59,13 +71,6 @@ target_include_directories(gps_parser PUBLIC
 option(TRACKER_BUILD_DESKTOP "Build desktop tools and tests" ON)
 
 if(TRACKER_BUILD_DESKTOP)
-    # ---------------------------------------------------------------------------
-    # Desktop demonstration
-    # ---------------------------------------------------------------------------
-
-    add_executable(tracker src/main.cpp)
-    target_link_libraries(tracker PRIVATE pointing)
-
 
     # ---------------------------------------------------------------------------
     # Desktop tests
@@ -136,5 +141,12 @@ if(TRACKER_BUILD_DESKTOP)
         )
         target_link_libraries(test_replay_position PRIVATE pointing test_helpers)
         add_test(NAME replay_position COMMAND test_replay_position)
+
+        # Radio payload layout, signed values, rounding, and malformed packets.
+        add_executable(test_position_packet
+            tests/cases/test_position_packet.cpp
+        )
+        target_link_libraries(test_position_packet PRIVATE position_packet test_helpers)
+        add_test(NAME position_packet COMMAND test_position_packet)
     endif() # BUILD_TESTING
 endif() # TRACKER_BUILD_DESKTOP

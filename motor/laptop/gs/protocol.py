@@ -21,9 +21,10 @@ The two directions, one line each, "\n" terminated:
     SAVE,<id>                           CFG,<id>,<az_accel>,...
     DEFAULTS,<id>                       GEAR,<id>,<ON|OFF>,<az_num>,...
     SETTINGS,<id>                       TRK,<id>,<ON|OFF>,<az_target>,...
-    GEAR,<id>[,<ON|OFF>]
-    TRACK,<id>[,<ON|OFF|REPLAY>]
+    GEAR,<id>[,<ON|OFF>]                RX,<ON|OFF>,ok=<n>,bad=<n>,...
+    TRACK,<id>[,<ON|OFF|REPLAY>]        STATION,<id>,<from>,<lat_e7>,...
     TARGET,<id>,<az_mdeg>,<el_mdeg>
+    STATION,<id>[,<lat_e7>,<lon_e7>,<alt_mm>]
 
 A MOVE can also turn both axes at once, each at its own speed:
 `MOVE,<id>,AZ,<mdps>,<mdeg>,EL,<mdps>,<mdeg>`. It is answered with one ACK,
@@ -49,6 +50,30 @@ here all end a replay. A target is absolute, names both axes, and is answered wi
 at all** when accepted - it arrives several times a second and an ACK apiece
 would double the traffic without saying anything the TRK stream is not
 already saying. Only a refusal comes back.
+
+On firmware with the radio receiver built in, TRACK ON means **follow the
+rocket over the radio**: the ground Pico turns each position it receives into
+a target itself, and is refused with ERR station if it has no ground-station
+position to point from. A TARGET from here takes over from the radio, so a
+laptop source still works - it just has to keep sending. TRACK OFF also
+resets the radio's packet ordering, which is the only way a transmitter that
+restarted (its sequence back at 0) is heard again.
+
+STATION asks where the ground station is that the radio is pointed from, or
+moves it until the Pico restarts: latitude and longitude in ten-millionths
+of a degree, altitude in millimetres above the WGS84 ellipsoid. The reply
+says where the one in force came from - SET over USB, BUILTIN from
+radio_config.hpp, NONE, or REPLAY for a build whose radio plays the
+simulated flight, which refuses a new one with ERR fixed. It is refused as
+busy while tracking, so the antenna never jumps mid-flight. The window
+keeps its own copy on the laptop and sends it on every connect and every
+radio arm (see `station_file.py`), which is what makes a Pico restart
+harmless.
+
+RX is that receiver's once-a-second summary, unprompted and with no id.
+Every number in it is a total since the Pico started, or a worst case since
+then; `radio.py` turns them into rates and ages. It is sent only when there
+is room in the USB buffer, so one can go missing.
 
 TRK answers TRACK, and also arrives unprompted a few times a second while
 tracking, with an id of 0. It is the only report that comes out while an axis
@@ -117,6 +142,11 @@ OFF = "OFF"
 # firmware. The TRK replies still say ON - it is armed.
 REPLAY = "REPLAY"
 
+# Seconds the Pico keeps tracking with no target before it gives up: a copy
+# of TRACK_TIMEOUT_MS in motor_config.hpp, which no reply carries. Only what
+# the laptop says uses it - change it when the firmware's changes.
+TRACK_TIMEOUT_S = 15
+
 # What SET can change: acceleration in deg/sec/sec, the travel limits and the
 # deadband in degrees. All cross the wire in thousandths, like every other
 # number.
@@ -125,6 +155,22 @@ SETTING_NAMES = ("ACCEL", "MIN", "MAX", "DEADBAND")
 # Every axis word the firmware can put in a reply, including the two that
 # only turn up in errors.
 AXIS_NAMES = ("AZ", "EL", "ALL", "NONE")
+
+# Where a STATION may be, from command_rules.hpp. Not the Pico's settings to
+# vary like the soft limits - these are where a place on Earth can be, plus
+# an altitude window that catches millimetres typed as metres - so they are
+# checked here before sending.
+STATION_LAT_MAX_DEG = 90.0
+STATION_LON_MAX_DEG = 180.0
+STATION_ALT_MIN_M = -1000.0
+STATION_ALT_MAX_M = 10000.0
+
+# The STATION reply's word for where the station in force came from.
+STATION_SET = "SET"
+STATION_BUILTIN = "BUILTIN"
+STATION_NONE = "NONE"
+STATION_REPLAY = "REPLAY"
+STATION_FROM = (STATION_SET, STATION_BUILTIN, STATION_NONE, STATION_REPLAY)
 
 # err_name() in replies.cpp, with what each one means to the operator.
 ERR_MEANING = {
@@ -143,7 +189,31 @@ ERR_MEANING = {
     "flash": "the Pico could not write its flash, so nothing was saved",
     "track": "tracking is not armed - send track on first",
     "replay": "this firmware has no replay station set in replay_config.hpp",
+    "fixed": "this build's radio plays the simulated flight, so it points "
+             "from replay_config.hpp's station and that cannot be changed - "
+             "set RADIO_POSITION_SOURCE to Gps and reflash for a real one",
+    # Not from err_name(): main.cpp sends this one itself, before decide().
+    "station": "the Pico has no ground-station position to point the radio "
+               "from - set one in the track panel (choose the rocket, fill "
+               "in the station, press set station)",
 }
+
+# The radio's status code in an RX line - a RadioLib error number from
+# initialising the radio or restarting reception. The ones worth putting into
+# words; anything else is reported by number. Values from RadioLib 7.8.1's
+# TypeDef.h, the release the firmware builds against.
+RADIO_ERROR_MEANING = {
+    0: "no fault",
+    -2: "the radio chip did not answer - check its wiring, 3V3 and ground",
+    -12: "the radio refused the frequency in radio_config.hpp",
+    -13: "the radio refused the output power in radio_config.hpp",
+    -16: "an SPI write to the radio did not read back - check the wiring",
+}
+
+
+def radio_error_message(code: int) -> str:
+    """A radio status code in words, for the operator."""
+    return RADIO_ERROR_MEANING.get(code, f"RadioLib error {code}")
 
 
 class CommandError(ValueError):
@@ -170,6 +240,22 @@ def deg_to_mdeg(deg: float) -> int:
 def mdeg_to_deg(mdeg: int) -> float:
     """Millidegrees back to degrees."""
     return mdeg / 1000.0
+
+
+def deg_to_e7(deg: float) -> int:
+    """Degrees of latitude or longitude into whole ten-millionths, for
+    STATION. About a centimetre on the ground. Rounds half away from zero,
+    like deg_to_mdeg."""
+    whole = int(abs(float(deg)) * 1e7 + 0.5)
+    return -whole if deg < 0 else whole
+
+
+def format_e7(e7: int) -> str:
+    """Ten-millionths of a degree as degrees: -803944878 -> "-80.3944878".
+    Built from the integer, like format_mdeg."""
+    sign = "-" if e7 < 0 else ""
+    whole, frac = divmod(abs(e7), 10_000_000)
+    return f"{sign}{whole}.{frac:07d}"
 
 
 def format_mdeg(mdeg: int) -> str:
@@ -455,6 +541,31 @@ def gear(cmd_id: int, on: bool | None = None) -> str:
     return f"GEAR,{cmd_id},{ON if on else OFF}"
 
 
+def station(cmd_id: int, lat_deg: float | None = None,
+            lon_deg: float | None = None, alt_m: float | None = None) -> str:
+    """Ask where the ground station is, or move it until the Pico restarts.
+
+    All three left out asks. Given, `alt_m` is metres above the WGS84
+    ellipsoid - the same reference the rocket's GPS altitude is turned
+    into - not above sea level. Refused as busy while tracking.
+    """
+    _check_id(cmd_id)
+    given = [v is not None for v in (lat_deg, lon_deg, alt_m)]
+    if not any(given):
+        return f"STATION,{cmd_id}"
+    if not all(given):
+        raise CommandError("a station needs latitude, longitude and altitude")
+    for value, what, lo, hi in (
+            (lat_deg, "latitude", -STATION_LAT_MAX_DEG, STATION_LAT_MAX_DEG),
+            (lon_deg, "longitude", -STATION_LON_MAX_DEG, STATION_LON_MAX_DEG),
+            (alt_m, "altitude", STATION_ALT_MIN_M, STATION_ALT_MAX_M)):
+        if not lo <= float(value) <= hi:  # also false for nan
+            raise CommandError(f"{what} must be {lo:g}..{hi:g}, got {value}")
+    # Millimetres are thousandths, so deg_to_mdeg's rounding does for metres.
+    return (f"STATION,{cmd_id},{deg_to_e7(lat_deg)},{deg_to_e7(lon_deg)},"
+            f"{deg_to_mdeg(alt_m)}")
+
+
 def encode(line: str) -> bytes:
     """A command line as the bytes to write to the port.
 
@@ -706,6 +817,59 @@ class Pong(Reply):
 
 
 @dataclass(frozen=True)
+class Station(Reply):
+    """The ground station the radio is pointed from, and where it came from.
+
+    `source` is one of STATION_FROM: SET (sent over USB since the Pico
+    started), BUILTIN (radio_config.hpp), NONE (nothing usable - radio
+    arming is refused, and the numbers are zeros) or REPLAY (a build whose
+    radio plays the simulated flight; it cannot be changed).
+    """
+
+    id: int
+    source: str
+    lat_e7: int
+    lon_e7: int
+    alt_mm: int
+
+    @property
+    def usable(self) -> bool:
+        return self.source != STATION_NONE
+
+    @property
+    def settable(self) -> bool:
+        return self.source != STATION_REPLAY
+
+    @property
+    def lat_deg(self) -> float:
+        return self.lat_e7 / 1e7
+
+    @property
+    def lon_deg(self) -> float:
+        return self.lon_e7 / 1e7
+
+    @property
+    def alt_m(self) -> float:
+        return self.alt_mm / 1000.0
+
+    def where(self) -> str:
+        """The position, the way it is shown everywhere."""
+        return (f"{format_e7(self.lat_e7)}, {format_e7(self.lon_e7)}, "
+                f"{format_mdeg(self.alt_mm)} m")
+
+    def describe(self) -> str:
+        """One line fit to print to the operator."""
+        if self.source == STATION_NONE:
+            return "none - the radio cannot be armed until one is set"
+        origin = {
+            STATION_SET: "set over USB",
+            STATION_BUILTIN: "built in, radio_config.hpp",
+            STATION_REPLAY: "the replay's, replay_config.hpp - fixed",
+        }.get(self.source, self.source)
+        return f"{self.where()} ({origin})"
+
+
+@dataclass(frozen=True)
 class Mstat(Reply):
     """The heartbeat. No id - this one is not a reply to anything.
 
@@ -718,6 +882,60 @@ class Mstat(Reply):
     az_mdeg: int
     el_mdeg: int
     moving: bool
+
+
+@dataclass(frozen=True)
+class Rx(Reply):
+    """The radio receiver's once-a-second summary. No id - nobody asked.
+
+    Totals since the Pico started, so a rate needs two of these and a clock:
+    see `radio.LinkWatch`. They all go back to zero when the Pico restarts.
+
+    `enabled` is whether reception is running, not whether tracking is
+    armed - packets are counted while disarmed too. `ok` counts positions
+    that decoded and were newer than the last one; `targets` counts the ones
+    that then became a motor target, which only happens while armed for the
+    radio. `bad` lumps together a bad read, a wrong length, a failed decode
+    and an out-of-order packet - it is not a count of packets lost in the
+    air, which nothing on the ground can know.
+    """
+
+    enabled: bool
+    ok: int
+    bad: int
+    seq: int
+    targets: int
+    error: int
+    # Worst cases since startup, in microseconds: one pass of the receive
+    # check, and the gap between two passes of the whole motor loop.
+    rx_max_us: int
+    loop_max_us: int
+
+    def error_message(self) -> str:
+        return radio_error_message(self.error)
+
+
+# The RX fields after the ON/OFF word, as they appear on the wire, with the
+# Rx attribute each one fills.
+_RX_KEYS = (
+    ("ok", "ok"), ("bad", "bad"), ("seq", "seq"), ("tgt", "targets"),
+    ("e", "error"), ("rx", "rx_max_us"), ("gap", "loop_max_us"),
+)
+
+
+def _parse_rx(f: list[str]) -> Rx:
+    # `key=value` rather than bare numbers, so each one is checked against
+    # the name it should have: a field slipped out of place is a bad line,
+    # not a plausible wrong number.
+    if len(f) != 2 + len(_RX_KEYS):
+        raise ValueError("wrong field count for RX")
+    values = {}
+    for text, (key, attr) in zip(f[2:], _RX_KEYS):
+        name, sep, number = text.partition("=")
+        if name != key or not sep:
+            raise ValueError(f"expected {key}=, got {text!r}")
+        values[attr] = _int(number)
+    return Rx(enabled=_word(f[1], ON, OFF), **values)
 
 
 @dataclass(frozen=True)
@@ -791,9 +1009,18 @@ class Info(Reply):
 RECORD_NAMES = frozenset(
     {
         "ACK", "PLAN", "DONE", "POS", "PIN", "LIM", "CFG", "GEAR", "TRK",
-        "PONG", "MSTAT", "ERR",
+        "PONG", "MSTAT", "ERR", "RX", "STATION",
     }
 )
+
+
+def is_chatter(record: Reply) -> bool:
+    """True for a line nobody asked for: heartbeat, radio summary, text, and
+    the TRK stream (id 0). None of these can be the answer to a command, so
+    a reader waiting for one must not keep them as if they were."""
+    return isinstance(record, (Mstat, Rx, Info)) or (
+        isinstance(record, Trk) and record.id == 0
+    )
 
 
 def _int(text: str) -> int:
@@ -950,6 +1177,17 @@ def parse_reply(line: str) -> Reply:
                 id=_int(f[1]), target=f[2], version=f[3], uptime_ms=_int(f[4])
             )
 
+        if name == "STATION" and len(f) == 6:
+            if f[2] not in STATION_FROM:
+                raise ValueError(f"not a station source: {f[2]!r}")
+            return Station(
+                id=_int(f[1]),
+                source=f[2],
+                lat_e7=_int(f[3]),
+                lon_e7=_int(f[4]),
+                alt_mm=_int(f[5]),
+            )
+
         if name == "MSTAT" and len(f) == 5:
             return Mstat(
                 uptime_s=_int(f[1]),
@@ -960,6 +1198,9 @@ def parse_reply(line: str) -> Reply:
 
         if name == "ERR":
             return _parse_err(f)
+
+        if name == "RX":
+            return _parse_rx(f)
 
     except ValueError:
         return Info(text, malformed=True)
